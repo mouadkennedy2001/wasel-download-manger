@@ -1,272 +1,389 @@
 <!doctype html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="rtl" data-theme="system" data-accent="blue">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="dark light">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-    <title>واصل — مدير التحميلات</title>
+    <meta name="color-scheme" content="light dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Wasel</title>
     <link rel="icon" type="image/svg+xml" href="../assets/wasel.svg">
-    <link rel="stylesheet" href="./styles.css">
-    <link rel="stylesheet" href="./icons.css">
-    <link rel="stylesheet" href="./ui-enhancements.css">
+    <link rel="stylesheet" href="./app.css">
   </head>
   <body>
-    <div class="app-frame">
-      <header class="window-titlebar">
-        <div class="window-titlebar-brand" aria-label="واصل — مدير التحميلات">
-          <img src="../assets/wasel.svg" alt="">
-          <span>واصل — مدير التحميلات</span>
+    <div class="app" id="app">
+      <!-- Sidebar -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top drag">
+          <div class="traffic-lights no-drag" id="trafficLights">
+            <button type="button" class="light light-close" data-window-action="close" data-i18n-aria="window.close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3.5 3.5 5 5m0-5-5 5"/></svg></button>
+            <button type="button" class="light light-minimize" data-window-action="minimize" data-i18n-aria="window.minimize"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6h6.4"/></svg></button>
+            <button type="button" class="light light-zoom" data-window-action="maximize" data-i18n-aria="window.zoom"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.2 8.8V4.6l4.2 4.2Zm5.6-5.6v4.2L4.6 3.2Z" fill="currentColor" stroke="none"/></svg></button>
+          </div>
         </div>
-        <div class="window-controls">
-          <button class="window-control" type="button" data-window-action="minimize" aria-label="تصغير النافذة" title="تصغير">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"></path></svg>
-          </button>
-          <button class="window-control maximize-control" type="button" data-window-action="maximize" aria-label="تكبير النافذة" title="تكبير">
-            <svg class="maximize-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx=".5"></rect></svg>
-            <svg class="restore-icon" viewBox="0 0 16 16" aria-hidden="true" hidden><path d="M5 5V3.5h7.5V11H11M4 6.5h7.5V13H4z"></path></svg>
-          </button>
-          <button class="window-control close-control" type="button" data-window-action="close" aria-label="إخفاء النافذة إلى جوار الساعة" title="إخفاء إلى علبة النظام">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg>
-          </button>
+
+        <nav class="sidebar-scroll" aria-label="Library" data-i18n-aria="sidebar.label">
+          <div class="sidebar-section">
+            <div class="sidebar-heading" data-i18n="sidebar.library">المكتبة</div>
+            <button class="nav-item selected" data-filter="all"><span data-icon="tray" class="nav-icon"></span><span class="nav-label" data-i18n="filter.all">كل التنزيلات</span><span class="nav-count" data-count="all"></span></button>
+            <button class="nav-item" data-filter="active"><span data-icon="arrow-down-circle" class="nav-icon"></span><span class="nav-label" data-i18n="filter.active">قيد التنزيل</span><span class="nav-count" data-count="active"></span></button>
+            <button class="nav-item" data-filter="queued"><span data-icon="clock" class="nav-icon"></span><span class="nav-label" data-i18n="filter.queued">في الانتظار</span><span class="nav-count" data-count="queued"></span></button>
+            <button class="nav-item" data-filter="completed"><span data-icon="check-circle" class="nav-icon"></span><span class="nav-label" data-i18n="filter.completed">مكتملة</span><span class="nav-count" data-count="completed"></span></button>
+            <button class="nav-item" data-filter="failed"><span data-icon="alert" class="nav-icon nav-icon-warn"></span><span class="nav-label" data-i18n="filter.failed">متعثرة</span><span class="nav-count" data-count="failed"></span></button>
+          </div>
+          <div class="sidebar-section">
+            <div class="sidebar-heading" data-i18n="sidebar.kinds">الأنواع</div>
+            <button class="nav-item" data-category="video"><span class="kind-tile kind-video"><span data-icon="film"></span></span><span class="nav-label" data-i18n="category.video">فيديو</span><span class="nav-count" data-count="video"></span></button>
+            <button class="nav-item" data-category="music"><span class="kind-tile kind-music"><span data-icon="music"></span></span><span class="nav-label" data-i18n="category.music">موسيقى</span><span class="nav-count" data-count="music"></span></button>
+            <button class="nav-item" data-category="documents"><span class="kind-tile kind-documents"><span data-icon="doc-text"></span></span><span class="nav-label" data-i18n="category.documents">مستندات</span><span class="nav-count" data-count="documents"></span></button>
+            <button class="nav-item" data-category="archives"><span class="kind-tile kind-archives"><span data-icon="archive"></span></span><span class="nav-label" data-i18n="category.archives">ملفات مضغوطة</span><span class="nav-count" data-count="archives"></span></button>
+            <button class="nav-item" data-category="software"><span class="kind-tile kind-software"><span data-icon="app"></span></span><span class="nav-label" data-i18n="category.software">برامج</span><span class="nav-count" data-count="software"></span></button>
+            <button class="nav-item" data-category="images"><span class="kind-tile kind-images"><span data-icon="photo"></span></span><span class="nav-label" data-i18n="category.images">صور</span><span class="nav-count" data-count="images"></span></button>
+            <button class="nav-item" data-category="other"><span class="kind-tile kind-other"><span data-icon="doc"></span></span><span class="nav-label" data-i18n="category.other">أخرى</span><span class="nav-count" data-count="other"></span></button>
+          </div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <section class="speed-card" aria-live="off">
+            <div class="speed-card-head">
+              <span class="speed-value"><span data-icon="download" class="speed-icon"></span><bdi id="speedValue">0 KB/s</bdi></span>
+              <button type="button" class="limit-chip turbo-chip" id="turboChip" data-i18n-title="turbo.toggle"><span data-icon="bolt"></span><span data-i18n="turbo.label">Turbo</span></button>
+              <button type="button" class="limit-chip" id="limitChip" data-i18n-title="speed.limitToggle"><span data-icon="gauge"></span><bdi id="limitLabel"></bdi></button>
+            </div>
+            <canvas id="speedGraph" class="speed-graph" width="200" height="44" aria-hidden="true"></canvas>
+            <div class="speed-meta" id="speedMeta"></div>
+          </section>
+          <button type="button" class="sidebar-settings" data-command="settings"><span data-icon="gear"></span><span data-i18n="settings.title">الإعدادات</span><kbd>Ctrl ,</kbd></button>
         </div>
-      </header>
-      <nav class="menu-bar" aria-label="القائمة الرئيسية">
-        <div class="menu-entry"><button class="menu-trigger" data-menu="tasks">المهام</button><div class="menu-popup">
-          <button data-command="add">إضافة تنزيل جديد... <kbd>Ctrl+N</kbd></button>
-          <button data-command="paste">إضافة رابط من الحافظة <kbd>Ctrl+Shift+V</kbd></button>
-          <hr><button data-command="export">تصدير قائمة التنزيلات...</button><button data-command="import">استيراد قائمة التنزيلات...</button><hr><button data-command="exit">خروج</button>
-        </div></div>
-        <div class="menu-entry"><button class="menu-trigger" data-menu="file">ملف</button><div class="menu-popup">
-          <button data-command="open">فتح الملف المحدد</button><button data-command="show">فتح مجلد الملف المحدد</button><button data-command="copy-url">نسخ رابط التنزيل</button><hr><button data-command="delete">حذف من القائمة... <kbd>Del</kbd></button>
-        </div></div>
-        <div class="menu-entry"><button class="menu-trigger" data-menu="downloads">التنزيلات</button><div class="menu-popup">
-          <button data-command="resume-selected">استئناف المحدد <kbd>Ctrl+R</kbd></button><button data-command="pause-selected">إيقاف مؤقت <kbd>Ctrl+P</kbd></button><button data-command="stop-all">إلغاء كل التنزيلات <kbd>Ctrl+Shift+S</kbd></button><hr><button data-command="clear-completed">حذف المكتملة من القائمة...</button><button data-command="scheduler">جدولة بدء التنزيلات...</button>
-        </div></div>
-        <div class="menu-entry"><button class="menu-trigger" data-menu="view">عرض</button><div class="menu-popup">
-          <button data-command="toggle-categories">إظهار/إخفاء التصنيفات <kbd>F4</kbd></button><button data-command="toggle-status">إظهار/إخفاء شريط الحالة</button><hr><button data-command="theme-light">المظهر الفاتح</button><button data-command="theme-dark">المظهر الداكن</button><button data-command="refresh">تحديث القائمة <kbd>F5</kbd></button>
-        </div></div>
-        <div class="menu-entry"><button class="menu-trigger" data-menu="help">مساعدة</button><div class="menu-popup">
-          <button data-command="shortcuts">اختصارات لوحة المفاتيح</button><button data-command="check-updates">التحقق من تحديثات واصل...</button><button data-command="help">دليل الاستخدام</button><button data-command="extension-guide">تثبيت إضافة المتصفح</button><button data-command="about">حول واصل</button>
-        </div></div>
-        <div class="menu-entry"><button class="menu-trigger" data-menu="license">التسجيل</button><div class="menu-popup">
-          <button data-command="license">الترخيص مفتوح المصدر</button>
-        </div></div>
-        <div class="menu-entry"><button class="menu-trigger browser-guide-trigger" data-command="extension-guide"><span class="browser-menu-icon" data-icon="browser"></span>إضافة المتصفح</button></div>
-      </nav>
+      </aside>
 
-      <section class="toolbar" aria-label="أدوات التنزيل">
-        <button class="tool-button" data-command="add" title="إضافة تنزيل جديد (Ctrl+N)"><span class="tool-icon add-icon" data-icon="add"></span><span>إضافة رابط</span></button>
-        <button class="tool-button" data-command="resume-selected" title="استئناف المحدد (Ctrl+R)"><span class="tool-icon resume-icon" data-icon="resume"></span><span>استئناف</span></button>
-        <button class="tool-button" data-command="pause-selected" title="إيقاف المحدد مؤقتًا (Ctrl+P)"><span class="tool-icon pause-icon" data-icon="pause"></span><span>إيقاف مؤقت</span></button>
-        <button class="tool-button" data-command="stop-all" title="إلغاء كل التنزيلات (Ctrl+Shift+S)"><span class="tool-icon stop-icon" data-icon="stop"></span><span>إيقاف الكل</span></button>
-        <span class="toolbar-separator"></span>
-        <button class="tool-button" data-command="delete" title="حذف المحدد من القائمة (Del)"><span class="tool-icon delete-icon" data-icon="delete"></span><span>حذف</span></button>
-        <button class="tool-button" data-command="clear-completed" title="إزالة الملفات المكتملة من القائمة"><span class="tool-icon clear-icon" data-icon="clear"></span><span>حذف المكتملة</span></button>
-        <span class="toolbar-separator"></span>
-        <button class="tool-button" data-command="options" title="إعدادات التطبيق"><span class="tool-icon options-icon" data-icon="settings"></span><span>خيارات</span></button>
-        <button class="tool-button" data-command="scheduler" title="جدولة بدء التنزيلات"><span class="tool-icon scheduler-icon" data-icon="schedule"></span><span>الجدولة</span></button>
-        <button class="tool-button" data-command="export" title="تصدير قائمة التنزيلات"><span class="tool-icon export-icon" data-icon="export"></span><span>تصدير</span></button>
-        <button class="tool-button" data-command="import" title="استيراد قائمة التنزيلات"><span class="tool-icon import-icon" data-icon="import"></span><span>استيراد</span></button>
-        <div class="toolbar-spacer"></div>
-        <label class="toolbar-search"><span class="search-icon" data-icon="search"></span><input id="searchInput" type="search" placeholder="بحث في التنزيلات..."><kbd>Ctrl+F</kbd></label>
-      </section>
+      <!-- Main column -->
+      <main class="main" id="main">
+        <header class="toolbar drag">
+          <div class="toolbar-title">
+            <h1 id="viewTitle" data-i18n="filter.all">كل التنزيلات</h1>
+            <p id="viewSubtitle"></p>
+          </div>
+          <div class="toolbar-actions no-drag">
+            <div class="button-group">
+              <button type="button" class="icon-button" data-command="resume-all" data-i18n-title="action.resumeAll"><span data-icon="play"></span></button>
+              <button type="button" class="icon-button" data-command="pause-all" data-i18n-title="action.pauseAll"><span data-icon="pause"></span></button>
+            </div>
+            <button type="button" class="icon-button" id="sortButton" data-i18n-title="sort.title"><span data-icon="sort"></span></button>
+            <label class="search-field">
+              <span data-icon="search" class="search-icon"></span>
+              <input id="searchInput" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="search.placeholder" placeholder="بحث">
+              <kbd class="search-kbd">Ctrl F</kbd>
+            </label>
+            <button type="button" class="icon-button" id="inspectorToggle" data-command="toggle-inspector" data-i18n-title="inspector.toggle"><span data-icon="inspector"></span></button>
+            <button type="button" class="button button-primary add-button" data-command="add"><span data-icon="plus"></span><span data-i18n="action.add">إضافة</span></button>
+          </div>
+        </header>
 
-      <main class="main-area">
-        <aside class="category-panel" id="categoryPanel">
-          <div class="panel-title"><strong>التصنيفات</strong><button id="hideCategories" title="إخفاء لوحة التصنيفات">×</button></div>
-          <div class="category-tree">
-            <button class="tree-item selected" data-filter="all"><span class="tree-chevron">▾</span><span class="tree-icon" data-icon="queue"></span><span>كل التنزيلات</span><span class="tree-count" id="countAll">0</span></button>
-            <button class="tree-item tree-child" data-category="archives"><span class="tree-icon category-archive" data-icon="archive"></span><span>ملفات مضغوطة</span><span class="tree-count" data-count-category="archives">0</span></button>
-            <button class="tree-item tree-child" data-category="documents"><span class="tree-icon category-document" data-icon="document"></span><span>مستندات</span><span class="tree-count" data-count-category="documents">0</span></button>
-            <button class="tree-item tree-child" data-category="media"><span class="tree-icon category-media" data-icon="media"></span><span>موسيقى وفيديو</span><span class="tree-count" data-count-category="media">0</span></button>
-            <button class="tree-item tree-child" data-category="software"><span class="tree-icon category-program" data-icon="software"></span><span>برامج</span><span class="tree-count" data-count-category="software">0</span></button>
-            <button class="tree-item tree-child" data-category="images"><span class="tree-icon category-image" data-icon="image"></span><span>صور</span><span class="tree-count" data-count-category="images">0</span></button>
-            <button class="tree-item" data-filter="unfinished"><span class="tree-chevron"></span><span class="tree-icon tree-blue" data-icon="schedule"></span><span>غير مكتملة</span><span class="tree-count" id="countUnfinished">0</span></button>
-            <button class="tree-item" data-filter="completed"><span class="tree-chevron"></span><span class="tree-icon tree-green" data-icon="clear"></span><span>مكتملة</span><span class="tree-count" id="countCompleted">0</span></button>
-            <div class="tree-section-label">قوائم التنزيل</div>
-            <button class="tree-item" data-filter="all"><span class="tree-chevron">▾</span><span class="tree-icon" data-icon="queue"></span><span>قائمة التنزيل الرئيسية</span><span class="tree-count" id="countQueue">0</span></button>
-            <div class="tree-note">التنزيلات النشطة والمتوقفة تظهر هنا.</div>
+        <section class="content" id="content">
+          <div class="list" id="list" role="listbox" aria-multiselectable="true" tabindex="0" data-i18n-aria="list.label"></div>
+          <div class="empty" id="emptyState" hidden>
+            <div class="empty-art"><span data-icon="tray"></span></div>
+            <h2 id="emptyTitle"></h2>
+            <p id="emptyBody"></p>
+            <div class="empty-actions">
+              <button type="button" class="button button-primary" data-command="add"><span data-icon="plus"></span><span data-i18n="action.addLink">إضافة رابط</span></button>
+              <button type="button" class="button button-secondary" data-command="paste"><span data-icon="clipboard"></span><span data-i18n="action.paste">لصق من الحافظة</span></button>
+            </div>
+            <ul class="empty-tips">
+              <li><span data-icon="browser"></span><span data-i18n="empty.tipBrowser">ثبّت إضافة المتصفح لالتقاط التنزيلات تلقائيًا</span></li>
+              <li><span data-icon="link"></span><span data-i18n="empty.tipDrop">اسحب أي رابط وأفلته هنا</span></li>
+              <li><span data-icon="keyboard"></span><span data-i18n="empty.tipPaste">اضغط Ctrl+V في أي مكان لإضافة الرابط المنسوخ</span></li>
+            </ul>
           </div>
-          <div class="tree-footer"><span class="online-dot"></span>محرك التنزيل جاهز</div>
-        </aside>
-
-        <section class="table-panel">
-          <div class="table-toolbar">
-            <div class="table-heading"><span class="table-folder-icon" data-icon="folder"></span><strong id="tableTitle">كل التنزيلات</strong><span class="table-total" id="tableTotal">0</span></div>
-            <div class="table-actions"><button data-command="open-folder" title="فتح مجلد التنزيلات">فتح مجلد التنزيلات</button><button data-command="refresh" title="تحديث">⟳</button></div>
-          </div>
-          <div class="table-wrap" id="tableWrap">
-            <table class="download-table">
-              <thead><tr>
-                <th class="select-column"><input id="selectAll" type="checkbox" aria-label="تحديد الكل"></th>
-                <th data-sort="fileName" class="name-column">اسم الملف <span class="sort-indicator">↕</span></th>
-                <th class="queue-column" title="قائمة التنزيل">≡</th>
-                <th data-sort="totalBytes" class="size-column">الحجم <span class="sort-indicator">↕</span></th>
-                <th data-sort="status" class="status-column">الحالة <span class="sort-indicator">↕</span></th>
-                <th class="time-column">الوقت المتبقي</th>
-                <th data-sort="speed" class="rate-column">معدل النقل <span class="sort-indicator">↕</span></th>
-                <th data-sort="createdAt" class="date-column">آخر محاولة <span class="sort-indicator">↕</span></th>
-                <th class="description-column">الوصف</th>
-              </tr></thead>
-              <tbody id="downloadRows"></tbody>
-            </table>
-            <div class="empty-state" id="emptyState"><div class="empty-file" data-icon="download"></div><strong>لا توجد تنزيلات لعرضها</strong><span>أضف رابطًا جديدًا أو اسحب رابط تنزيل إلى هذه النافذة.</span><button class="classic-button" data-command="add">إضافة رابط...</button></div>
-          </div>
-          <div class="table-footer"><span id="selectionSummary">لم يتم تحديد أي ملف</span><span>انقر بزر الفأرة الأيمن لعرض إجراءات الملف</span></div>
         </section>
+
+        <div class="selection-bar" id="selectionBar" hidden>
+          <span id="selectionCount"></span>
+          <span class="selection-divider"></span>
+          <button type="button" data-command="resume-selected"><span data-icon="play"></span><span data-i18n="action.resume">استئناف</span></button>
+          <button type="button" data-command="pause-selected"><span data-icon="pause"></span><span data-i18n="action.pause">إيقاف مؤقت</span></button>
+          <button type="button" data-command="remove-selected" class="danger"><span data-icon="trash"></span><span data-i18n="action.remove">إزالة</span></button>
+          <button type="button" class="selection-close" data-command="clear-selection" data-i18n-aria="action.clearSelection"><span data-icon="close"></span></button>
+        </div>
       </main>
 
-      <footer class="status-bar" id="statusBar">
-        <span id="statusCounts">0 تنزيل · 0 نشط · 0 مكتمل</span><span class="status-separator"></span>
-        <span id="diskStatus">مجلد الحفظ: <b id="statusFolder">—</b></span><span class="status-spacer"></span>
-        <span id="statusSpeed">↓ 0 KB/s</span><span class="status-limiter" id="statusLimiter">بلا حدود</span>
-      </footer>
-    </div>
-
-    <div class="modal-backdrop" id="modalBackdrop" hidden>
-      <section class="dialog add-dialog" id="addDialog" role="dialog" aria-modal="true" aria-labelledby="addDialogTitle" hidden>
-        <header class="dialog-titlebar"><strong id="addDialogTitle">إضافة تنزيل جديد</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <form id="downloadForm" class="dialog-content">
-          <label for="urlInput">العنوان:</label><textarea id="urlInput" rows="3" placeholder="https://example.com/file.zip" required></textarea>
-          <div class="inline-error" id="urlError" aria-live="polite"></div>
-          <div class="form-row"><label for="fileNameInput">اسم الملف:</label><input id="fileNameInput" type="text" placeholder="استنتاج تلقائي من الرابط"></div>
-          <div class="form-row"><label>حفظ في:</label><div class="folder-picker"><span id="dialogFolder">—</span><button type="button" id="browseFolder">استعراض...</button></div></div>
-          <label class="check-row"><input id="startImmediately" type="checkbox" checked> ابدأ التنزيل فورًا</label>
-          <div class="dialog-actions"><button type="button" class="classic-button" id="downloadLater">تنزيل لاحقًا</button><span class="action-spacer"></span><button type="button" class="classic-button" data-close-dialog>إلغاء</button><button type="submit" class="classic-button primary-classic">موافق</button></div>
-        </form>
-      </section>
-
-      <section class="dialog progress-dialog" id="progressDialog" role="dialog" aria-modal="false" aria-labelledby="progressTitle" hidden>
-        <header class="dialog-titlebar"><strong id="progressTitle">تقدم التنزيل</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content progress-content">
-          <div class="progress-tabs"><button class="progress-tab active" data-progress-tab="status">حالة التنزيل</button><button class="progress-tab" data-progress-tab="details">التفاصيل</button></div>
-          <div class="progress-view" id="progressStatusView">
-            <div class="progress-field"><span>العنوان</span><a id="progressUrl" href="#"></a></div>
-            <div class="progress-field"><span>الحالة</span><b id="progressStatus"></b></div>
-            <div class="progress-field"><span>حجم الملف</span><b id="progressSize"></b></div>
-            <div class="progress-field"><span>تم تنزيل</span><b id="progressReceived"></b></div>
-            <div class="progress-field"><span>معدل النقل</span><b id="progressRate"></b></div>
-            <div class="progress-field"><span>الوقت المتبقي</span><b id="progressEta"></b></div>
-            <div class="classic-progress" role="progressbar" aria-label="تقدم التنزيل" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progressBar"></span></div>
-            <div class="progress-percent" id="progressPercent">0%</div>
+      <!-- Inspector -->
+      <aside class="inspector" id="inspector" hidden aria-labelledby="inspectorName">
+        <header class="inspector-head drag">
+          <span data-i18n="inspector.title" class="inspector-heading">المعلومات</span>
+          <button type="button" class="icon-button no-drag" data-command="toggle-inspector" data-i18n-aria="action.close"><span data-icon="close"></span></button>
+        </header>
+        <div class="inspector-body" id="inspectorBody">
+          <div class="inspector-empty" id="inspectorEmpty"><span data-icon="info"></span><p data-i18n="inspector.empty">اختر تنزيلًا لعرض تفاصيله.</p></div>
+          <div class="inspector-content" id="inspectorContent" hidden>
+            <div class="inspector-hero">
+              <div class="file-tile file-tile-lg" id="inspectorTile"></div>
+              <h2 id="inspectorName" dir="auto"></h2>
+              <p id="inspectorKind"></p>
+            </div>
+            <div class="inspector-progress">
+              <div class="progress"><span id="inspectorBar"></span></div>
+              <div class="inspector-progress-meta"><bdi id="inspectorPercent"></bdi><bdi id="inspectorRate"></bdi></div>
+            </div>
+            <section class="inspector-group" id="segmentsGroup">
+              <div class="group-heading"><span data-i18n="inspector.connections">الاتصالات</span><bdi id="segmentsCount"></bdi></div>
+              <canvas id="segmentMap" class="segment-map" width="280" height="22" aria-hidden="true"></canvas>
+              <canvas id="itemGraph" class="item-graph" width="280" height="52" aria-hidden="true"></canvas>
+            </section>
+            <dl class="info-list" id="infoList"></dl>
+            <div class="inspector-actions" id="inspectorActions">
+              <button type="button" class="button button-secondary" data-inspector="open"><span data-icon="external"></span><span data-i18n="action.open">فتح</span></button>
+              <button type="button" class="button button-secondary" data-inspector="show"><span data-icon="folder-search"></span><span data-i18n="action.showInFolder">إظهار في المجلد</span></button>
+              <button type="button" class="button button-secondary" data-inspector="copy-url"><span data-icon="link"></span><span data-i18n="action.copyLink">نسخ الرابط</span></button>
+              <button type="button" class="button button-secondary" data-inspector="restart"><span data-icon="retry"></span><span data-i18n="action.redownload">إعادة التنزيل</span></button>
+              <button type="button" class="button button-secondary" data-inspector="hash"><span data-icon="hash"></span><span data-i18n="action.computeHash">حساب SHA-256</span></button>
+              <button type="button" class="button button-danger" data-inspector="remove"><span data-icon="trash"></span><span data-i18n="action.remove">إزالة</span></button>
+            </div>
           </div>
-          <div class="progress-view details-view" id="progressDetailsView" hidden><div class="details-line"><span>ملف الحفظ</span><b id="detailsPath"></b></div><div class="details-line"><span>التصنيف</span><b id="detailsCategory"></b></div><div class="details-line"><span>إمكانية الاستئناف</span><b id="detailsResume"></b></div><div class="connection-log" id="connectionLog"></div></div>
-          <div class="dialog-actions"><button class="classic-button" data-progress-action="pause" id="progressPause">إيقاف مؤقت</button><span class="action-spacer"></span><button class="classic-button" data-close-dialog>إغلاق النافذة</button><button class="classic-button danger-classic" data-progress-action="cancel">إيقاف مع الاحتفاظ بالجزء</button></div>
         </div>
-      </section>
-
-      <section class="dialog options-dialog" id="optionsDialog" role="dialog" aria-modal="true" aria-labelledby="optionsTitle" hidden>
-        <header class="dialog-titlebar"><strong id="optionsTitle">خيارات واصل</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content">
-          <div class="settings-section-title">الإعدادات العامة والحفظ</div>
-          <label class="settings-row"><span>لغة الواجهة</span><select id="languageSelect"></select></label>
-          <label class="settings-row"><span>المظهر</span><select id="themeSelect"><option value="light">فاتح</option><option value="dark">داكن</option></select></label>
-          <label class="settings-row"><span>الحد الأقصى للتنزيلات المتزامنة</span><select id="concurrencySelect"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option></select></label>
-          <label class="settings-row"><span>الاتصالات المتوازية لكل تنزيل</span><select id="connectionsPerDownloadSelect"><option value="1">1 — اتصال واحد</option><option value="2">2 — متوازن</option><option value="4">4 — سريع</option><option value="8">8 — أقصى سرعة</option></select></label>
-          <div class="settings-row folder-setting"><span>مجلد التنزيل</span><span id="optionsFolder"></span><button id="optionsBrowse">تغيير...</button></div>
-          <label class="settings-toggle-row" for="startWithWindows"><span><strong>بدء واصل مع Windows</strong><small>إظهار التطبيق في تبويب Startup وبدؤه مخفيًا قرب الساعة</small></span><input id="startWithWindows" type="checkbox"><span class="settings-toggle-switch" aria-hidden="true"></span></label>
-          <div class="dialog-actions"><span class="action-spacer"></span><button class="classic-button" data-close-dialog>إلغاء</button><button class="classic-button primary-classic" id="saveOptions" disabled>موافق</button></div>
-        </div>
-      </section>
-
-      <section class="dialog update-dialog" id="updateDialog" role="dialog" aria-modal="true" aria-labelledby="updateDialogTitle" hidden>
-        <header class="dialog-titlebar"><strong id="updateDialogTitle">تحديثات واصل</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content update-content">
-          <div class="update-brand"><img src="../assets/wasel.svg" alt=""><div><strong>واصل</strong><span>تحديثات التطبيق</span></div></div>
-          <p id="updateStatus" class="update-status" role="status" aria-live="polite">لم يبدأ البحث عن تحديثات.</p>
-          <p id="updateDetail" class="update-detail"></p>
-          <div id="updateProgress" class="update-progress" role="progressbar" aria-label="تقدم تنزيل التحديث" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span id="updateProgressBar"></span></div>
-          <div id="updateAccessHelp" class="update-access-help" hidden>المستودع خاص. اضبط متغير المستخدم GH_TOKEN في Windows برمز قراءة للمستودع، ثم أعد تشغيل واصل. لا تشارك الرمز أو تضعه في الملفات.</div>
-          <div class="dialog-actions"><span class="action-spacer"></span><button class="classic-button" data-close-dialog>إغلاق</button><button id="installUpdate" class="classic-button primary-classic" hidden>إعادة التشغيل والتثبيت</button><button id="checkUpdates" class="classic-button primary-classic">التحقق الآن</button></div>
-        </div>
-      </section>
-
-      <section class="dialog extension-guide-dialog" id="extensionGuideDialog" role="dialog" aria-modal="true" aria-labelledby="extensionGuideTitle" hidden>
-        <header class="dialog-titlebar"><strong id="extensionGuideTitle"><span data-icon="browser"></span> تثبيت إضافة واصل للمتصفح</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content extension-guide-content">
-          <p class="extension-guide-intro">اتبع الخطوات الخاصة بمتصفحك. الرسوم التوضيحية تبين الأزرار التي ستحتاجها.</p>
-          <div class="extension-guide-callout"><span data-icon="shield"></span><span>إرسال الروابط لا يثبّت برامج في المتصفح؛ تحكّم في التقاط التنزيلات من إعداد الإضافة، ويطلب واصل موافقتك قبل كل تنزيل.</span></div>
-          <nav class="extension-browser-tabs" aria-label="المتصفحات المدعومة">
-            <button type="button" class="extension-browser-tab active" data-extension-tab="chrome"><span class="browser-brand chrome-brand">C</span> Chrome وBrave</button>
-            <button type="button" class="extension-browser-tab" data-extension-tab="edge"><span class="browser-brand edge-brand">e</span> Microsoft Edge</button>
-            <button type="button" class="extension-browser-tab" data-extension-tab="firefox"><span class="browser-brand firefox-brand">F</span> Firefox</button>
-          </nav>
-          <section class="extension-guide-panel" data-extension-panel="chrome">
-            <figure class="extension-guide-figure">
-              <img src="../extension/tutorial/chromium-extensions.svg" alt="رسم توضيحي لصفحة إضافات Chromium مع تحديد تحميل إضافة غير محزّمة">
-              <figcaption>رسم توضيحي لموضع وضع المطوّر وزر تحميل الإضافة في صفحة الإضافات.</figcaption>
-            </figure>
-            <ol class="extension-steps">
-              <li><strong>ابنِ ملفات الإضافة</strong><span>افتح الطرفية في مجلد المشروع وشغّل:</span><code>npm run build:ts</code><button type="button" class="copy-guide-button" data-copy-build>نسخ الأمر</button></li>
-              <li><strong>افتح صفحة الإضافات</strong><span>أدخل هذا العنوان في شريط المتصفح:</span><code>chrome://extensions</code><span>ينطبق المسار نفسه على Brave عبر <bdi>brave://extensions</bdi>.</span></li>
-              <li><strong>فعّل وضع المطوّر</strong><span>شغّل زر وضع المطوّر أعلى صفحة الإضافات، ثم اضغط «تحميل إضافة غير محزّمة».</span></li>
-              <li><strong>اختر مجلد الإضافة</strong><span>اختر هذا المجلد، وليس ملف manifest منفردًا:</span><code class="extension-path" data-extension-path>extension</code><button type="button" class="copy-guide-button" data-copy-extension-path>نسخ المسار</button></li>
-              <li><strong>ثبّت الإضافة واستخدمها</strong><span>اختياريًا ثبّت أيقونة واصل في شريط الأدوات. افتح صفحة ويب واضغط الأيقونة ثم «إرسال إلى واصل» لإضافة الرابط بعد تأكيدك.</span></li>
-              <li class="extension-capture-tip"><strong>التقاط التنزيلات تلقائيًا</strong><span>افتح نافذة الإضافة وفعّل خيار التحويل إلى واصل؛ عند تنزيل HTTP/HTTPS يلتقط التطبيق الرابط ويطلب تأكيدًا قبل البدء. أوقف الخيار لاستعادة تنزيلات المتصفح.</span></li>
-            </ol>
-          </section>
-          <section class="extension-guide-panel" data-extension-panel="edge" hidden>
-            <figure class="extension-guide-figure">
-              <img src="../extension/tutorial/edge-extensions.svg" alt="رسم توضيحي لصفحة إضافات Microsoft Edge مع تحديد تحميل غير مضغوط">
-              <figcaption>رسم توضيحي لصفحة Edge Extensions وأزرار التثبيت المحلي.</figcaption>
-            </figure>
-            <ol class="extension-steps">
-              <li><strong>ابنِ ملفات الإضافة</strong><span>شغّل الأمر التالي من مجلد المشروع مرة واحدة:</span><code>npm run build:ts</code><button type="button" class="copy-guide-button" data-copy-build>نسخ الأمر</button></li>
-              <li><strong>افتح صفحة Edge Extensions</strong><span>أدخل في شريط العنوان:</span><code>edge://extensions</code></li>
-              <li><strong>فعّل وضع المطوّر</strong><span>فعّل مفتاح Developer mode، ثم اضغط «Load unpacked».</span></li>
-              <li><strong>اختر مجلد الإضافة</strong><span>اختر مجلد extension الموجود داخل مشروع واصل:</span><code class="extension-path" data-extension-path>extension</code><button type="button" class="copy-guide-button" data-copy-extension-path>نسخ المسار</button></li>
-              <li><strong>ثبّت الإضافة</strong><span>من قائمة Extensions ثبّت أيقونة واصل، ثم أرسل رابط الصفحة ووافق على إضافته في التطبيق.</span></li>
-              <li class="extension-capture-tip"><strong>التقاط التنزيلات تلقائيًا</strong><span>افتح نافذة الإضافة وفعّل التحويل إلى واصل لتسليم التنزيلات مباشرةً؛ سيسألك التطبيق قبل أن يبدأ. يمكنك إيقاف الخيار في أي وقت.</span></li>
-            </ol>
-          </section>
-          <section class="extension-guide-panel" data-extension-panel="firefox" hidden>
-            <figure class="extension-guide-figure">
-              <img src="../extension/tutorial/firefox-debugging.svg" alt="رسم توضيحي لصفحة تصحيح إضافات Firefox مع تحديد تحميل إضافة مؤقتة">
-              <figcaption>رسم توضيحي لتحميل الإضافة مؤقتًا من about:debugging.</figcaption>
-            </figure>
-            <ol class="extension-steps">
-              <li><strong>ابنِ ملفات الإضافة</strong><span>شغّل هذا الأمر من الطرفية في مجلد المشروع:</span><code>npm run build:ts</code><button type="button" class="copy-guide-button" data-copy-build>نسخ الأمر</button></li>
-              <li><strong>افتح صفحة التصحيح</strong><span>أدخل العنوان التالي في Firefox:</span><code>about:debugging#/runtime/this-firefox</code></li>
-              <li><strong>جهّز إعداد Firefox</strong><span>احفظ نسخة Chromium، ثم شغّل الأمر من مجلد extension:</span><code>Copy-Item manifest.json manifest.chromium.json; Copy-Item manifest.firefox.json manifest.json</code></li>
-              <li><strong>حمّل الإضافة مؤقتًا</strong><span>اضغط «Load Temporary Add-on…» واختر الملف:</span><code class="extension-manifest-path" data-extension-path data-path-suffix="\manifest.json">extension\manifest.json</code><button type="button" class="copy-guide-button" data-copy-extension-path="manifest">نسخ المسار</button></li>
-              <li><strong>ابدأ الاستخدام</strong><span>افتح صفحة ويب، اضغط أيقونة واصل، وأرسل الرابط بعد مراجعته.</span></li>
-              <li class="extension-capture-tip"><strong>التقاط التنزيلات تلقائيًا</strong><span>بعد إضافة الإضافة، افتح نافذتها وفعّل التحويل إلى واصل. راجع الرابط ووافق عليه في التطبيق قبل التنزيل.</span></li>
-              <li class="extension-note"><strong>ملاحظة عن Firefox</strong><span>الإضافة المؤقتة تُزال عند إغلاق المتصفح. للتثبيت الدائم تحتاج حزمة XPI موقعة من Mozilla؛ هذا المشروع لا ينشر حزمة موقعة بعد.</span></li>
-            </ol>
-          </section>
-          <div class="extension-guide-security"><span data-icon="shield"></span><span>تستخدم الإضافة صلاحيات علامة التبويب والتنزيلات والتخزين للالتقاط الاختياري. لا تقرأ محتوى الصفحات ولا ترسل بيانات التصفح إلى خادم.</span></div>
-          <div class="dialog-actions"><span class="action-spacer"></span><button type="button" class="classic-button primary-classic" data-close-dialog>إغلاق</button></div>
-        </div>
-      </section>
-
-      <section class="dialog schedule-dialog" id="scheduleDialog" role="dialog" aria-modal="true" aria-labelledby="scheduleTitle" hidden>
-        <header class="dialog-titlebar"><strong id="scheduleTitle">جدولة التنزيلات</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content">
-          <p class="dialog-help">اختر وقتًا لبدء التنزيلات المتوقفة في هذه الجلسة.</p>
-          <label class="settings-row"><span>وقت البدء</span><input id="scheduleTime" type="time"></label>
-          <div class="schedule-notice" id="scheduleNotice">لا توجد جدولة نشطة.</div>
-          <div class="dialog-actions"><button class="classic-button" id="cancelSchedule">إلغاء الجدولة</button><span class="action-spacer"></span><button class="classic-button" data-close-dialog>إغلاق</button><button class="classic-button primary-classic" id="saveSchedule">جدولة</button></div>
-        </div>
-      </section>
-
-      <section class="dialog info-dialog" id="infoDialog" role="dialog" aria-modal="true" aria-labelledby="infoTitle" hidden>
-        <header class="dialog-titlebar"><strong id="infoTitle">معلومات</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content"><p id="infoMessage"></p><div class="dialog-actions"><span class="action-spacer"></span><button class="classic-button primary-classic" data-close-dialog>موافق</button></div></div>
-      </section>
-
-      <section class="dialog delete-dialog" id="deleteDialog" role="dialog" aria-modal="true" aria-labelledby="deleteTitle" hidden>
-        <header class="dialog-titlebar"><strong id="deleteTitle">حذف التنزيل</strong><button type="button" data-close-dialog aria-label="إغلاق"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"></path></svg></button></header>
-        <div class="dialog-content"><p id="deleteMessage">هل تريد إزالة التنزيلات المحددة من القائمة؟</p><label class="check-row"><input id="deleteFromDisk" type="checkbox"> حذف الملفات المكتملة من القرص أيضًا</label><div class="dialog-actions"><span class="action-spacer"></span><button class="classic-button" data-close-dialog>إلغاء</button><button class="classic-button danger-classic" id="confirmDelete">حذف</button></div></div>
-      </section>
-
-      <div class="context-menu" id="contextMenu" hidden>
-        <button data-context="open">فتح</button><button data-context="show">فتح مجلد الملف</button><hr>
-        <button data-context="resume">استئناف</button><button data-context="pause">إيقاف مؤقت</button><button data-context="cancel">إلغاء مع الاحتفاظ بالجزء</button>
-        <hr><button data-context="copy-url">نسخ الرابط</button><button data-context="copy-path">نسخ مسار الملف</button><hr><button data-context="delete">حذف من القائمة...</button><button data-context="delete-file">حذف الملف والجزء...</button>
-      </div>
-      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      </aside>
     </div>
+
+    <!-- Sheets -->
+    <div class="scrim" id="scrim" hidden></div>
+
+    <section class="sheet add-sheet" id="addSheet" role="dialog" aria-modal="true" aria-labelledby="addTitle" hidden>
+      <form id="addForm" novalidate>
+        <header class="sheet-head">
+          <div class="sheet-icon"><span data-icon="download"></span></div>
+          <div>
+            <h2 id="addTitle" data-i18n="add.title">تنزيل جديد</h2>
+            <p id="addSource" class="sheet-subtitle" data-i18n="add.subtitle">ألصق رابطًا واحدًا أو عدة روابط، كل رابط في سطر.</p>
+          </div>
+        </header>
+        <div class="sheet-body">
+          <div class="field">
+            <textarea id="urlInput" rows="3" spellcheck="false" dir="ltr" data-i18n-placeholder="add.placeholder" placeholder="https://example.com/file.zip"></textarea>
+            <p class="field-hint" data-i18n="add.batchHint">تلميح: استخدم [1-20] لإضافة سلسلة مرقّمة من الملفات.</p>
+          </div>
+          <ul class="probe-list" id="probeList" hidden></ul>
+          <div class="form-grid">
+            <label class="form-label" data-i18n="add.saveTo">حفظ في</label>
+            <div class="folder-field">
+              <span data-icon="folder"></span>
+              <bdi id="addFolder" dir="ltr"></bdi>
+              <button type="button" class="button button-small" id="addBrowse" data-i18n="action.change">تغيير…</button>
+            </div>
+            <label class="form-label" for="fileNameInput" data-i18n="add.fileName" id="fileNameLabel">اسم الملف</label>
+            <input id="fileNameInput" class="text-input" type="text" spellcheck="false" data-i18n-placeholder="add.fileNameAuto" placeholder="تلقائي">
+            <span class="form-label" data-i18n="add.connections">الاتصالات</span>
+            <div class="segmented" id="connectionsControl" role="radiogroup">
+              <button type="button" data-value="0" data-i18n="add.auto" class="active">تلقائي</button>
+              <button type="button" data-value="1">1</button>
+              <button type="button" data-value="2">2</button>
+              <button type="button" data-value="4">4</button>
+              <button type="button" data-value="8">8</button>
+              <button type="button" data-value="16">16</button>
+              <button type="button" data-value="32">32</button>
+            </div>
+          </div>
+          <details class="disclosure" id="advancedOptions">
+            <summary><span data-icon="chevron" class="disclosure-chevron"></span><span data-i18n="add.advanced">خيارات متقدمة</span></summary>
+            <div class="form-grid">
+              <label class="form-label" for="refererInput" data-i18n="add.referer">صفحة المصدر</label>
+              <input id="refererInput" class="text-input" type="url" dir="ltr" spellcheck="false" placeholder="https://">
+              <label class="form-label" for="cookieInput" data-i18n="add.cookies">ملفات تعريف الارتباط</label>
+              <input id="cookieInput" class="text-input" type="text" dir="ltr" spellcheck="false" placeholder="name=value; other=value">
+              <label class="form-label" for="userAgentInput" data-i18n="add.userAgent">وكيل المستخدم</label>
+              <input id="userAgentInput" class="text-input" type="text" dir="ltr" spellcheck="false" data-i18n-placeholder="add.userAgentDefault" placeholder="افتراضي">
+              <label class="form-label" for="checksumInput" data-i18n="add.checksum">بصمة التحقق</label>
+              <input id="checksumInput" class="text-input mono" type="text" dir="ltr" spellcheck="false" data-i18n-placeholder="add.checksumHint" placeholder="SHA-256 / SHA-1 / MD5">
+            </div>
+          </details>
+          <p class="form-error" id="addError" role="alert"></p>
+        </div>
+        <footer class="sheet-foot">
+          <label class="switch-row">
+            <span class="switch"><input id="startImmediately" type="checkbox" checked><span></span></span>
+            <span data-i18n="add.startNow">ابدأ فورًا</span>
+          </label>
+          <span class="spacer"></span>
+          <button type="button" class="button button-secondary" data-close-sheet data-i18n="action.cancel">إلغاء</button>
+          <button type="submit" class="button button-primary" id="addSubmit"><span data-i18n="action.download">تنزيل</span></button>
+        </footer>
+      </form>
+    </section>
+
+    <section class="sheet settings-sheet" id="settingsSheet" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-labelledby="settingsTitle">
+          <h2 id="settingsTitle" data-i18n="settings.title">الإعدادات</h2>
+          <button type="button" class="settings-tab active" data-pane="general"><span class="kind-tile tile-gray"><span data-icon="gear"></span></span><span data-i18n="settings.general">عام</span></button>
+          <button type="button" class="settings-tab" data-pane="downloads"><span class="kind-tile tile-blue"><span data-icon="download"></span></span><span data-i18n="settings.downloads">التنزيلات</span></button>
+          <button type="button" class="settings-tab" data-pane="network"><span class="kind-tile tile-green"><span data-icon="network"></span></span><span data-i18n="settings.network">الشبكة</span></button>
+          <button type="button" class="settings-tab" data-pane="browser"><span class="kind-tile tile-orange"><span data-icon="puzzle"></span></span><span data-i18n="settings.browser">المتصفح</span></button>
+          <button type="button" class="settings-tab" data-pane="schedule"><span class="kind-tile tile-red"><span data-icon="calendar"></span></span><span data-i18n="settings.schedule">الجدولة</span></button>
+          <button type="button" class="settings-tab" data-pane="updates"><span class="kind-tile tile-purple"><span data-icon="update"></span></span><span data-i18n="settings.updates">التحديثات</span><span class="tab-badge" id="updateBadge" hidden></span></button>
+          <button type="button" class="settings-tab" data-pane="about"><span class="kind-tile tile-teal"><span data-icon="info"></span></span><span data-i18n="settings.about">حول واصل</span></button>
+        </nav>
+        <div class="settings-panes">
+          <button type="button" class="icon-button settings-close" data-close-sheet data-i18n-aria="action.close"><span data-icon="close"></span></button>
+
+          <section class="pane" data-pane="general">
+            <h3 data-i18n="settings.general">عام</h3>
+            <div class="group">
+              <label class="row"><span class="row-label" data-i18n="settings.language">اللغة</span><select id="languageSelect" class="select"></select></label>
+              <div class="row row-stack">
+                <span class="row-label" data-i18n="settings.appearance">المظهر</span>
+                <div class="appearance-picker" id="themePicker" role="radiogroup">
+                  <button type="button" data-theme-option="system"><span class="appearance-thumb thumb-system"></span><span data-i18n="theme.system">تلقائي</span></button>
+                  <button type="button" data-theme-option="light"><span class="appearance-thumb thumb-light"></span><span data-i18n="theme.light">فاتح</span></button>
+                  <button type="button" data-theme-option="dark"><span class="appearance-thumb thumb-dark"></span><span data-i18n="theme.dark">داكن</span></button>
+                </div>
+              </div>
+              <div class="row">
+                <span class="row-label" data-i18n="settings.accent">لون التمييز</span>
+                <div class="accent-picker" id="accentPicker" role="radiogroup">
+                  <button type="button" data-accent-option="blue" data-i18n-title="accent.blue"></button>
+                  <button type="button" data-accent-option="purple" data-i18n-title="accent.purple"></button>
+                  <button type="button" data-accent-option="pink" data-i18n-title="accent.pink"></button>
+                  <button type="button" data-accent-option="red" data-i18n-title="accent.red"></button>
+                  <button type="button" data-accent-option="orange" data-i18n-title="accent.orange"></button>
+                  <button type="button" data-accent-option="yellow" data-i18n-title="accent.yellow"></button>
+                  <button type="button" data-accent-option="green" data-i18n-title="accent.green"></button>
+                  <button type="button" data-accent-option="graphite" data-i18n-title="accent.graphite"></button>
+                </div>
+              </div>
+            </div>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.startWithWindows">التشغيل مع Windows</span><small data-i18n="settings.startWithWindowsHint">يبدأ مخفيًا في علبة النظام جاهزًا لالتقاط التنزيلات.</small></span><span class="switch"><input type="checkbox" data-setting="startWithWindows"><span></span></span></label>
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.notifications">إشعار عند انتهاء التنزيل</span></span><span class="switch"><input type="checkbox" data-setting="notifyOnComplete"><span></span></span></label>
+            </div>
+          </section>
+
+          <section class="pane" data-pane="downloads" hidden>
+            <h3 data-i18n="settings.downloads">التنزيلات</h3>
+            <div class="group">
+              <div class="row"><span class="row-text"><span class="row-label" data-i18n="settings.saveLocation">مكان الحفظ</span><small><bdi id="settingsFolder" dir="ltr"></bdi></small></span><span class="row-buttons"><button type="button" class="button button-small" id="openOutputFolder" data-i18n="action.open">فتح</button><button type="button" class="button button-small" id="changeOutputFolder" data-i18n="action.change">تغيير…</button></span></div>
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.categoryFolders">ترتيب الملفات في مجلدات حسب النوع</span><small data-i18n="settings.categoryFoldersHint">فيديو، موسيقى، مستندات، برامج…</small></span><span class="switch"><input type="checkbox" data-setting="categoryFolders"><span></span></span></label>
+            </div>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.turbo">وضع السرعة القصوى (Turbo)</span><small data-i18n="settings.turboHint">32 اتصالًا لكل ملف دون حد للسرعة، لاستغلال كامل سرعة الإنترنت في جهازك.</small></span><span class="switch"><input type="checkbox" data-setting="turbo"><span></span></span></label>
+              <label class="row"><span class="row-label" data-i18n="settings.simultaneous">التنزيلات المتزامنة</span><select class="select" data-setting="maxActiveDownloads" data-number><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option></select></label>
+              <div class="row"><span class="row-text"><span class="row-label" data-i18n="settings.connections">الاتصالات لكل ملف</span><small data-i18n="settings.connectionsHint">تُقسَّم الملفات الكبيرة ديناميكيًا لتبقى كل الاتصالات مشغولة حتى آخر بايت.</small></span>
+                <div class="segmented" data-setting-segmented="connectionsPerDownload"><button type="button" data-value="1">1</button><button type="button" data-value="2">2</button><button type="button" data-value="4">4</button><button type="button" data-value="8">8</button><button type="button" data-value="16">16</button><button type="button" data-value="32">32</button></div>
+              </div>
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.retries">إعادة المحاولة تلقائيًا</span><small data-i18n="settings.retriesHint">عند انقطاع الاتصال يستأنف واصل من حيث توقف.</small></span><select class="select" data-setting="retryCount" data-number><option value="0" data-i18n="settings.never">أبدًا</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
+              <label class="row"><span class="row-label" data-i18n="settings.preventSleep">منع السكون أثناء التنزيل</span><span class="switch"><input type="checkbox" data-setting="preventSleep"><span></span></span></label>
+              <label class="row"><span class="row-label" data-i18n="settings.whenDone">عند انتهاء كل التنزيلات</span><select class="select" data-setting="whenDone"><option value="none" data-i18n="whenDone.none">لا شيء</option><option value="quit" data-i18n="whenDone.quit">إنهاء واصل</option><option value="sleep" data-i18n="whenDone.sleep">سكون الجهاز</option><option value="shutdown" data-i18n="whenDone.shutdown">إيقاف تشغيل الجهاز</option></select></label>
+            </div>
+            <div class="group">
+              <div class="row"><span class="row-label" data-i18n="settings.library">قائمة التنزيلات</span><span class="row-buttons"><button type="button" class="button button-small" data-command="import"><span data-i18n="action.import">استيراد…</span></button><button type="button" class="button button-small" data-command="export"><span data-i18n="action.export">تصدير…</span></button><button type="button" class="button button-small" data-command="clear-completed"><span data-i18n="action.clearCompleted">مسح المكتملة</span></button></span></div>
+            </div>
+          </section>
+
+          <section class="pane" data-pane="network" hidden>
+            <h3 data-i18n="settings.network">الشبكة</h3>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.speedLimit">تحديد السرعة</span><small data-i18n="settings.speedLimitHint">يُطبَّق على كل التنزيلات معًا ليبقى التصفح سلسًا.</small></span><span class="switch"><input type="checkbox" id="speedLimitToggle"><span></span></span></label>
+              <div class="row" id="speedLimitRow"><span class="row-label" data-i18n="settings.maxSpeed">السرعة القصوى</span><span class="inline-inputs"><input type="number" class="text-input number-input" id="speedLimitValue" min="1" max="100000" step="1" dir="ltr"><select class="select" id="speedLimitUnit"><option value="1024">KB/s</option><option value="1048576">MB/s</option></select></span></div>
+            </div>
+            <div class="group">
+              <div class="row"><span class="row-label" data-i18n="settings.proxy">الوكيل (Proxy)</span>
+                <div class="segmented" id="proxyMode"><button type="button" data-value="system" data-i18n="proxy.system">النظام</button><button type="button" data-value="none" data-i18n="proxy.none">بدون</button><button type="button" data-value="manual" data-i18n="proxy.manual">يدوي</button></div>
+              </div>
+              <div class="row" id="proxyRow"><span class="row-label" data-i18n="settings.proxyAddress">العنوان</span><input type="text" class="text-input" id="proxyUrl" dir="ltr" spellcheck="false" placeholder="127.0.0.1:8080"></div>
+            </div>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.userAgent">هوية المتصفح (User-Agent)</span><small data-i18n="settings.userAgentHint">بعض المواقع ترفض البرامج غير المعروفة؛ يتنكّر واصل كمتصفح حديث.</small></span>
+                <select class="select" id="userAgentPreset"><option value="" data-i18n="ua.default">Chrome (افتراضي)</option><option value="firefox">Firefox</option><option value="edge">Edge</option><option value="safari">Safari</option><option value="custom" data-i18n="ua.custom">مخصص…</option></select></label>
+              <div class="row" id="userAgentRow" hidden><input type="text" class="text-input wide" id="userAgentCustom" dir="ltr" spellcheck="false"></div>
+            </div>
+          </section>
+
+          <section class="pane" data-pane="browser" hidden>
+            <h3 data-i18n="settings.browser">المتصفح</h3>
+            <div class="bridge-status" id="bridgeStatus"><span class="status-dot"></span><span id="bridgeText"></span></div>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.askBeforeCapture">التأكيد قبل بدء التنزيلات الملتقطة</span><small data-i18n="settings.askBeforeCaptureHint">أوقفه لتبدأ التنزيلات القادمة من المتصفح مباشرة.</small></span><span class="switch"><input type="checkbox" data-setting="askBeforeCapture"><span></span></span></label>
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="settings.clipboard">مراقبة الحافظة</span><small data-i18n="settings.clipboardHint">اعرض إشعارًا عند نسخ رابط ملف قابل للتنزيل.</small></span><span class="switch"><input type="checkbox" data-setting="clipboardMonitor"><span></span></span></label>
+            </div>
+            <h4 data-i18n="extension.install">تثبيت الإضافة</h4>
+            <div class="segmented browser-tabs" id="browserTabs"><button type="button" data-value="chromium" class="active">Chrome · Brave · Edge · Opera</button><button type="button" data-value="firefox">Firefox</button></div>
+            <ol class="steps" id="stepsChromium">
+              <li><span data-i18n="extension.chromium1">افتح صفحة الإضافات:</span> <code dir="ltr">chrome://extensions</code> <span class="muted" data-i18n="extension.chromium1b">(أو edge://extensions)</span></li>
+              <li data-i18n="extension.chromium2">فعّل «وضع المطوّر» من أعلى الصفحة.</li>
+              <li data-i18n="extension.chromium3">اضغط «تحميل إضافة غير محزّمة» واختر هذا المجلد:</li>
+            </ol>
+            <ol class="steps" id="stepsFirefox" hidden>
+              <li><span data-i18n="extension.firefox1">افتح:</span> <code dir="ltr">about:debugging#/runtime/this-firefox</code></li>
+              <li data-i18n="extension.firefox2">اضغط «تحميل إضافة مؤقتة» واختر ملف manifest.json داخل هذا المجلد:</li>
+            </ol>
+            <div class="path-box"><bdi id="extensionPath" dir="ltr"></bdi><span class="row-buttons"><button type="button" class="button button-small" id="copyExtensionPath"><span data-icon="copy"></span><span data-i18n="action.copy">نسخ</span></button><button type="button" class="button button-small" id="openExtensionPath"><span data-icon="folder"></span><span data-i18n="action.open">فتح</span></button></span></div>
+            <p class="pane-note" data-i18n="extension.note">ترسل الإضافة الرابط مع ملفات تعريف الارتباط وصفحة المصدر إلى واصل على جهازك فقط، لذلك تعمل التنزيلات التي تتطلب تسجيل الدخول.</p>
+          </section>
+
+          <section class="pane" data-pane="schedule" hidden>
+            <h3 data-i18n="settings.schedule">الجدولة</h3>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="schedule.enable">تشغيل الجدولة</span><small id="scheduleNext"></small></span><span class="switch"><input type="checkbox" id="scheduleEnabled"><span></span></span></label>
+              <label class="row"><span class="row-label" data-i18n="schedule.start">بدء قائمة الانتظار في</span><input type="time" class="text-input time-input" id="scheduleStart" dir="ltr"></label>
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="schedule.stop">إيقاف مؤقت في</span><small data-i18n="schedule.stopHint">اتركه فارغًا لتستمر حتى النهاية.</small></span><input type="time" class="text-input time-input" id="scheduleStop" dir="ltr"></label>
+              <div class="row row-stack"><span class="row-label" data-i18n="schedule.days">الأيام</span><div class="day-picker" id="dayPicker"></div></div>
+            </div>
+            <p class="pane-note" data-i18n="schedule.note">تعمل الجدولة ما دام واصل يعمل في علبة النظام. فعّل «التشغيل مع Windows» لتبقى نشطة دائمًا.</p>
+          </section>
+
+          <section class="pane" data-pane="updates" hidden>
+            <h3 data-i18n="settings.updates">التحديثات</h3>
+            <div class="update-card" id="updateCard">
+              <div class="update-icon"><img src="../assets/wasel.svg" alt=""></div>
+              <div class="update-text">
+                <strong id="updateTitle"></strong>
+                <span id="updateDetail"></span>
+                <div class="progress update-progress" id="updateProgress" hidden><span id="updateBar"></span></div>
+              </div>
+              <div class="update-actions">
+                <button type="button" class="button button-secondary" id="checkUpdates" data-i18n="updates.check">التحقق الآن</button>
+                <button type="button" class="button button-primary" id="downloadUpdate" hidden data-i18n="updates.download">تنزيل التحديث</button>
+                <button type="button" class="button button-primary" id="installUpdate" hidden data-i18n="updates.install">إعادة التشغيل والتحديث</button>
+              </div>
+            </div>
+            <div class="group">
+              <label class="row"><span class="row-text"><span class="row-label" data-i18n="updates.auto">تنزيل التحديثات تلقائيًا</span><small data-i18n="updates.autoHint">يُثبَّت التحديث عند إعادة تشغيل واصل.</small></span><span class="switch"><input type="checkbox" data-setting="autoUpdate"><span></span></span></label>
+            </div>
+            <pre class="release-notes" id="releaseNotes" hidden></pre>
+          </section>
+
+          <section class="pane about-pane" data-pane="about" hidden>
+            <img class="about-icon" src="../assets/wasel.svg" alt="">
+            <h3 class="about-name" data-i18n="app.name">واصل</h3>
+            <p class="about-version"><bdi id="aboutVersion"></bdi></p>
+            <p class="about-tagline" data-i18n="app.tagline">مدير تنزيلات سريع وأنيق ومفتوح المصدر.</p>
+            <div class="about-actions">
+              <button type="button" class="button button-secondary" data-link="website"><span data-icon="globe"></span><span data-i18n="about.website">الموقع</span></button>
+              <button type="button" class="button button-secondary" data-link="repository"><span data-icon="external"></span><span>GitHub</span></button>
+              <button type="button" class="button button-secondary" data-link="issues"><span data-icon="alert"></span><span data-i18n="about.report">الإبلاغ عن مشكلة</span></button>
+            </div>
+            <p class="about-credit"><span data-i18n="about.developer">تطوير</span> <bdi>زروقي أحمد معاذ — Zerouki Ahmed Mouad</bdi></p>
+            <p class="about-credit"><span data-i18n="about.assistant">مساعد مطوّر</span> <a href="#" data-link="assistant" dir="ltr">riadfgg</a></p>
+            <p class="about-legal" data-i18n="about.legal">مجاني ومفتوح المصدر. الخطوط: Inter وIBM Plex Sans Arabic بترخيص SIL OFL.</p>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="sheet alert-sheet" id="alertSheet" role="alertdialog" aria-modal="true" aria-labelledby="alertTitle" hidden>
+      <div class="alert-icon"><img src="../assets/wasel.svg" alt=""></div>
+      <h2 id="alertTitle"></h2>
+      <p id="alertMessage"></p>
+      <label class="check-row" id="alertCheckRow" hidden><input type="checkbox" id="alertCheck"><span id="alertCheckLabel"></span></label>
+      <div class="alert-buttons">
+        <button type="button" class="button button-secondary" data-close-sheet id="alertCancel" data-i18n="action.cancel">إلغاء</button>
+        <button type="button" class="button button-primary" id="alertConfirm"></button>
+      </div>
+    </section>
+
+    <div class="menu" id="menu" role="menu" hidden></div>
+    <div class="toast-stack" id="toasts" aria-live="polite"></div>
+    <div class="drop-overlay" id="dropOverlay" hidden><div><span data-icon="download"></span><strong data-i18n="drop.title">أفلت الروابط لتنزيلها</strong></div></div>
+
+    <script src="./i18n.js"></script>
     <script src="./icons.js"></script>
     <script src="./renderer.js"></script>
   </body>

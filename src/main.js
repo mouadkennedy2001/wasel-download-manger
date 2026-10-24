@@ -1,70 +1,102 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, clipboard, Menu, Tray, Notification } = require('electron');
+const {
+  app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, nativeTheme, powerSaveBlocker, screen, session, shell
+} = require('electron');
+const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const { execFile } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
 const { DownloadManager } = require('./download-manager');
-const { isSupportedLanguage, SUPPORTED_LANGUAGES } = require('./languages');
+const { UpdateService } = require('./updater');
+const { createBridgeServer } = require('./bridge-server');
+const { Scheduler } = require('./scheduler');
+const { createTranslator } = require('./i18n');
+const { SUPPORTED_LANGUAGES, isSupportedLanguage } = require('./languages');
 
-let mainWindow;
-let manager;
-let parseDownloadProtocolUrl;
-let isClosing = false;
-let pendingProtocolUrls = [];
-let protocolQueue = Promise.resolve();
-let tray;
-let updateCheckTimer;
-let lastUpdateProgress = 0;
-let updateCheckPromise;
-let updateDownloaded = false;
-let updateStatus = {
-  key: 'لم يبدأ البحث عن تحديثات.',
-  detail: '',
-  type: 'info',
-  progress: 0
-};
+const APP_ID = 'com.zerouki.wasel';
+const WEBSITE = 'https://mouadkennedy2001.github.io/wasel-download-manger/';
+const REPOSITORY = 'https://github.com/mouadkennedy2001/wasel-download-manger';
+const ICON = path.join(__dirname, '..', 'assets', 'wasel.ico');
+const CLIPBOARD_LINK = /^https?:\/\/[^\s]+\.(zip|rar|7z|tar|gz|tgz|xz|iso|img|exe|msi|msix|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4v|mp3|flac|wav|m4a|aac|ogg|pdf|epub|docx?|xlsx?|pptx?|psd)(\?[^\s]*)?$/i;
+
+let mainWindow = null;
+let tray = null;
+let manager = null;
+let updates = null;
+let bridge = null;
+let scheduler = null;
+let parseDownloadProtocolUrl = null;
+let t = (key) => key;
+let isQuitting = false;
+let rendererReady = false;
+let pendingIncoming = [];
+let powerBlocker = null;
+let lastClipboard = '';
+let clipboardTimer = null;
+let extensionPaths = { chromium: '', firefox: '' };
+let windowStateTimer = null;
 const launchHidden = process.argv.includes('--hidden');
+const supportsMica = process.platform === 'win32' && !process.env.WASEL_NO_MATERIAL
+  && Number(os.release().split('.')[2] || 0) >= 22621;
+// Development and screenshot runs use an isolated profile instead of the user's library.
+if (process.env.WASEL_USER_DATA) app.setPath('userData', process.env.WASEL_USER_DATA);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-function broadcast(channel, payload) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, payload);
-  }
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+
+function send(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
 
 function showMainWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
 }
 
-function processProtocolUrl(rawUrl) {
-  if (!/^wasel:/i.test(rawUrl)) return;
-  if (!manager || !mainWindow) {
-    pendingProtocolUrls.push(rawUrl);
+// Links from the browser, the protocol handler or the clipboard open the add sheet so
+// the user always sees and confirms what is about to be downloaded.
+function presentIncoming(payload) {
+  showMainWindow();
+  if (!rendererReady) {
+    pendingIncoming.push(payload);
     return;
   }
+  send('downloads:incoming', payload);
+}
 
-  protocolQueue = protocolQueue.then(async () => {
-    const url = parseDownloadProtocolUrl(rawUrl);
-    showMainWindow();
-    const answer = await dialog.showMessageBox(mainWindow, {
-      type: 'question',
-      buttons: ['إضافة إلى قائمة التنزيل', 'إلغاء'],
-      defaultId: 1,
-      cancelId: 1,
-      title: 'واصل — طلب تنزيل جديد',
-      message: 'هل تريد إضافة هذا الرابط إلى قائمة التنزيلات؟',
-      detail: url,
-      noLink: true
-    });
-    if (answer.response === 0) {
-      await manager.add({ url, startImmediately: true });
-    }
-  }).catch((error) => {
-    dialog.showErrorBox('تعذر استقبال رابط التنزيل', error.message);
-  });
+function notify({ title, body, onClick }) {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title, body, icon: ICON, silent: false });
+  if (onClick) notification.on('click', onClick);
+  notification.show();
+}
+
+async function loadLocale(code) {
+  const language = isSupportedLanguage(code) ? code : 'ara';
+  const read = async (name) => JSON.parse(await fs.readFile(path.join(__dirname, '..', 'lang', `${name}.json`), 'utf8'));
+  const locale = await read(language);
+  const english = language === 'eng' ? null : await read('eng');
+  t = createTranslator({ ...locale, fallback: english?.messages });
+  updateTrayMenu();
+}
+
+function processProtocolUrl(rawUrl) {
+  if (!/^wasel:/i.test(rawUrl)) return;
+  if (!parseDownloadProtocolUrl) {
+    pendingIncoming.push({ protocol: rawUrl });
+    return;
+  }
+  try {
+    presentIncoming({ urls: [parseDownloadProtocolUrl(rawUrl)], source: 'protocol' });
+  } catch (error) {
+    send('app:notice', { key: 'notice.badLink', type: 'error' });
+  }
 }
 
 if (!hasSingleInstanceLock) {
@@ -74,7 +106,6 @@ if (!hasSingleInstanceLock) {
     event.preventDefault();
     processProtocolUrl(url);
   });
-
   app.on('second-instance', (_event, commandLine) => {
     const protocolUrl = commandLine.find((argument) => /^wasel:/i.test(argument));
     showMainWindow();
@@ -82,208 +113,309 @@ if (!hasSingleInstanceLock) {
   });
 }
 
-function createWindow() {
+async function readWindowState() {
+  try {
+    const stored = JSON.parse(await fs.readFile(path.join(app.getPath('userData'), 'window-state.json'), 'utf8'));
+    const visible = screen.getAllDisplays().some(({ workArea }) =>
+      stored.x < workArea.x + workArea.width - 80 && stored.x + stored.width > workArea.x + 80
+      && stored.y < workArea.y + workArea.height - 40 && stored.y >= workArea.y - 20);
+    return visible ? stored : { width: stored.width, height: stored.height, maximized: stored.maximized };
+  } catch {
+    return { width: 1180, height: 760 };
+  }
+}
+
+function saveWindowState() {
+  clearTimeout(windowStateTimer);
+  windowStateTimer = setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const bounds = mainWindow.getNormalBounds();
+    fs.writeFile(path.join(app.getPath('userData'), 'window-state.json'),
+      JSON.stringify({ ...bounds, maximized: mainWindow.isMaximized() })).catch(() => {});
+  }, 400);
+}
+
+async function createWindow() {
+  const stored = await readWindowState();
   mainWindow = new BrowserWindow({
-    width: 1240,
-    height: 780,
-    minWidth: 760,
-    minHeight: 420,
-    backgroundColor: '#171d24',
-    title: 'واصل — مدير التحميلات',
+    x: stored.x,
+    y: stored.y,
+    width: Math.max(stored.width || 1180, 820),
+    height: Math.max(stored.height || 760, 520),
+    minWidth: 820,
+    minHeight: 520,
     frame: false,
-    show: !launchHidden,
-    icon: path.join(__dirname, '..', 'assets', 'wasel.ico'),
+    show: false,
+    backgroundColor: supportsMica ? '#00000000' : (nativeTheme.shouldUseDarkColors ? '#1e1e20' : '#f5f5f7'),
+    ...(supportsMica ? { backgroundMaterial: 'mica' } : {}),
+    title: 'Wasel',
+    icon: ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      spellcheck: false
     }
   });
-
-  if (!launchHidden) {
-    mainWindow.once('ready-to-show', () => mainWindow?.show());
-  }
+  if (stored.maximized) mainWindow.maximize();
+  mainWindow.once('ready-to-show', () => {
+    if (!launchHidden || pendingIncoming.length) mainWindow?.show();
+  });
   mainWindow.on('close', (event) => {
-    if (!isClosing) {
-      event.preventDefault();
-      mainWindow.hide();
-    }
+    if (isQuitting) return;
+    event.preventDefault();
+    mainWindow.hide();
+    showTrayHintOnce();
   });
-  mainWindow.on('maximize', () => broadcast('window:maximized', true));
-  mainWindow.on('unmaximize', () => broadcast('window:maximized', false));
-  mainWindow.on('closed', () => { mainWindow = null; });
-  mainWindow.webContents.once('did-finish-load', () => {
-    setTimeout(startUpdateChecks, 1200);
+  mainWindow.on('maximize', () => { send('window:maximized', true); saveWindowState(); });
+  mainWindow.on('unmaximize', () => { send('window:maximized', false); saveWindowState(); });
+  mainWindow.on('resize', saveWindowState);
+  mainWindow.on('move', saveWindowState);
+  mainWindow.on('focus', () => send('window:focus', true));
+  mainWindow.on('blur', () => send('window:focus', false));
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    rendererReady = false;
   });
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== pathToFileURL(path.join(__dirname, 'index.html')).href) {
-      event.preventDefault();
-    }
+    if (url !== pathToFileURL(path.join(__dirname, 'index.html')).href) event.preventDefault();
   });
-  mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  await mainWindow.loadFile(path.join(__dirname, 'index.html'));
+}
+
+async function showTrayHintOnce() {
+  const marker = path.join(app.getPath('userData'), 'tray-hint-shown');
+  try {
+    await fs.access(marker);
+  } catch {
+    notify({ title: t('main.trayHint.title'), body: t('main.trayHint.body'), onClick: showMainWindow });
+    fs.writeFile(marker, '1').catch(() => {});
+  }
 }
 
 function createTray() {
-  tray = new Tray(path.join(__dirname, '..', 'assets', 'wasel.ico'));
-  tray.setToolTip('واصل — مدير التحميلات');
+  tray = new Tray(ICON);
   tray.on('click', showMainWindow);
   tray.on('double-click', showMainWindow);
   updateTrayMenu();
 }
 
-function updateTrayMenu(downloadState = manager?.getState()) {
-  if (!tray || tray.isDestroyed() || !downloadState) return;
-  const activeCount = downloadState.downloads.filter((item) => item.status === 'downloading').length;
-  const hasRunningDownloads = downloadState.downloads.some((item) =>
-    item.status === 'downloading' || item.status === 'queued'
-  );
-  tray.setToolTip(activeCount
-    ? `واصل — ${activeCount} تنزيل نشط`
-    : 'واصل — مدير التحميلات');
+function updateTrayMenu(state = manager?.getState()) {
+  if (!tray || tray.isDestroyed() || !state) return;
+  const { active, queued } = state.stats;
+  const running = active + queued > 0;
+  tray.setToolTip(active
+    ? `${t('app.name')} — ${t('main.tray.active', { count: active })} · ${formatSpeed(state.stats.speed)}`
+    : t('app.name'));
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'فتح واصل', click: showMainWindow },
+    { label: t('main.tray.open'), click: showMainWindow },
+    { label: t('main.tray.add'), click: () => presentIncoming({ urls: [], source: 'manual' }) },
+    { type: 'separator' },
     {
-      label: hasRunningDownloads ? 'إيقاف التنزيلات مؤقتًا' : 'استئناف التنزيلات',
-      click: () => {
-        const action = hasRunningDownloads ? manager.pauseAll() : manager.resumeAll();
-        action.catch((error) => dialog.showErrorBox('تعذر التحكم بالتنزيلات', error.message));
-      }
+      label: running ? t('main.tray.pauseAll') : t('main.tray.resumeAll'),
+      click: () => (running ? manager.pauseAll() : manager.resumeAll()).catch(() => {})
     },
     { type: 'separator' },
-    { label: 'إنهاء واصل', click: () => app.quit() }
+    { label: t('main.tray.quit'), click: () => app.quit() }
   ]));
 }
 
-function publishUpdateStatus(key, detail = '', type = 'info', progress = 0) {
-  updateStatus = { key, detail, type, progress };
-  broadcast('updates:status', updateStatus);
+function formatSpeed(bytes) {
+  if (!bytes) return '0 KB/s';
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
-async function checkForUpdates() {
-  if (!app.isPackaged) {
-    publishUpdateStatus('التحديثات التلقائية متاحة في النسخة المثبتة فقط.', '', 'info');
-    return false;
+let lastTraySignature = '';
+function onDownloadsChanged(state) {
+  send('downloads:changed', state);
+  const signature = `${state.stats.active}|${state.stats.queued}|${Math.round(state.stats.speed / 51200)}`;
+  if (signature !== lastTraySignature) {
+    lastTraySignature = signature;
+    updateTrayMenu(state);
   }
-  if (!process.env.GH_TOKEN) {
-    publishUpdateStatus(
-      'يلزم إعداد GH_TOKEN للوصول إلى مستودع GitHub الخاص.',
-      'أنشئ رمزًا بصلاحية Contents: Read-only للمستودع، واحفظه كمتغير مستخدم GH_TOKEN في Windows ثم أعد تشغيل واصل.',
-      'error'
-    );
-    return false;
-  }
-  if (updateCheckPromise) return updateCheckPromise;
-  publishUpdateStatus('يجري التحقق من وجود تحديثات...', '', 'checking');
-  updateCheckPromise = autoUpdater.checkForUpdates()
-    .then((result) => {
-      if (result && result.isUpdateAvailable === false) {
-        publishUpdateStatus('لديك أحدث إصدار من واصل.', `الإصدار الحالي: ${app.getVersion()}.`);
-      }
-      return Boolean(result?.isUpdateAvailable);
-    })
-    .catch((error) => {
-      publishUpdateStatus('تعذر التحقق من التحديث.', error.message, 'error');
-      throw error;
-    })
-    .finally(() => {
-      updateCheckPromise = null;
-    });
-  return updateCheckPromise;
+  updateTaskbar(state);
+  updatePowerBlocker(state);
 }
 
-function startUpdateChecks() {
-  if (!app.isPackaged) return;
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  lastUpdateProgress = 0;
-  autoUpdater.on('checking-for-update', () => publishUpdateStatus('يجري التحقق من وجود تحديثات...', '', 'checking'));
-  autoUpdater.on('update-available', (info) => {
-    publishUpdateStatus('يتوفر تحديث واصل', `الإصدار ${info.version}. سيبدأ التنزيل تلقائيًا.`);
-  });
-  autoUpdater.on('update-not-available', (info) => {
-    publishUpdateStatus('لديك أحدث إصدار من واصل.', `الإصدار الحالي: ${info.version || app.getVersion()}.`);
-  });
-  autoUpdater.on('download-progress', (progress) => {
-    const percent = Math.round(progress.percent);
-    if (percent >= lastUpdateProgress + 10) {
-      lastUpdateProgress = percent;
-      publishUpdateStatus('جارٍ تنزيل تحديث واصل...', `تم تنزيل ${percent}٪.`, 'downloading', percent);
-    }
-  });
-  autoUpdater.on('update-downloaded', (info) => {
-    updateDownloaded = true;
-    publishUpdateStatus('اكتمل تنزيل تحديث واصل.', `الإصدار ${info.version} جاهز للتثبيت.`);
-    const installPrompt = () => dialog.showMessageBox({
-      type: 'info',
-      title: 'تحديث واصل جاهز',
-      message: `اكتمل تنزيل واصل ${info.version}.`,
-      detail: 'أعد تشغيل التطبيق الآن لتثبيت التحديث، أو اختر لاحقًا.',
-      buttons: ['إعادة التشغيل والتثبيت', 'لاحقًا'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true
-    }).then(({ response }) => {
-      if (response === 0) autoUpdater.quitAndInstall();
-    }).catch((error) => {
-      dialog.showErrorBox('تعذر تثبيت تحديث واصل', error.message);
+function updateTaskbar(state) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const active = state.downloads.filter((item) => item.status === 'downloading');
+  if (!active.length) {
+    mainWindow.setProgressBar(state.stats.queued ? 2 : -1, { mode: state.stats.queued ? 'indeterminate' : 'none' });
+    return;
+  }
+  const sized = active.filter((item) => item.totalBytes > 0);
+  if (!sized.length) {
+    mainWindow.setProgressBar(2, { mode: 'indeterminate' });
+    return;
+  }
+  const received = sized.reduce((sum, item) => sum + item.receivedBytes, 0);
+  const total = sized.reduce((sum, item) => sum + item.totalBytes, 0);
+  mainWindow.setProgressBar(Math.min(1, received / total), { mode: 'normal' });
+}
+
+function updatePowerBlocker(state) {
+  const shouldBlock = state.settings.preventSleep && state.stats.active > 0;
+  if (shouldBlock && powerBlocker === null) {
+    powerBlocker = powerSaveBlocker.start('prevent-app-suspension');
+  } else if (!shouldBlock && powerBlocker !== null) {
+    powerSaveBlocker.stop(powerBlocker);
+    powerBlocker = null;
+  }
+}
+
+function onDownloadEvent(event) {
+  const settings = manager.getState().settings;
+  if (event.type === 'completed' && settings.notifyOnComplete) {
+    const body = event.item.checksum?.ok === false ? `${event.item.fileName}\n${t('main.notify.checksumMismatch')}` : event.item.fileName;
+    notify({ title: t('main.notify.completed'), body, onClick: () => shell.showItemInFolder(event.item.savePath) });
+  } else if (event.type === 'failed' && settings.notifyOnComplete) {
+    notify({ title: t('main.notify.failed'), body: event.item.fileName, onClick: showMainWindow });
+  } else if (event.type === 'idle' && settings.whenDone !== 'none') {
+    runWhenDone(settings.whenDone).catch(() => {});
+  }
+}
+
+async function runWhenDone(action) {
+  await manager.updateSettings({ whenDone: 'none' });
+  if (action === 'quit') {
+    app.quit();
+  } else if (action === 'sleep' && process.platform === 'win32') {
+    execFile('rundll32.exe', ['powrprof.dll,SetSuspendState', '0,1,0']);
+  } else if (action === 'shutdown' && process.platform === 'win32') {
+    execFile('shutdown', ['/s', '/t', '60']);
+    notify({
+      title: t('main.notify.shutdownTitle'),
+      body: t('main.notify.shutdownBody'),
+      onClick: () => execFile('shutdown', ['/a'])
     });
-    if (Notification.isSupported()) {
-      const notification = new Notification({
-        title: 'تحديث واصل جاهز',
-        body: 'انقر لإعادة التشغيل وتثبيت التحديث.'
-      });
-      notification.on('click', installPrompt);
-      notification.show();
-    } else {
-      installPrompt();
-    }
-  });
-  autoUpdater.on('error', (error) => {
-    publishUpdateStatus('تعذر التحقق من التحديث.', error.message, 'error');
-  });
-  checkForUpdates().catch((error) => {
-    publishUpdateStatus('تعذر التحقق من التحديث.', error.message, 'error');
-  });
-  updateCheckTimer = setInterval(() => {
-    checkForUpdates().catch((error) => {
-      publishUpdateStatus('تعذر التحقق من التحديث.', error.message, 'error');
-    });
-  }, 6 * 60 * 60 * 1000);
-  updateCheckTimer.unref();
+  }
 }
 
 function setWindowsStartup(enabled) {
-  if (typeof enabled !== 'boolean') throw new Error('إعداد بدء التشغيل مع Windows غير صالح.');
-  if (process.platform !== 'win32') {
-    throw new Error('بدء التشغيل التلقائي مدعوم حاليًا على Windows فقط.');
+  if (process.platform !== 'win32') throw new Error('WASEL:startup-unsupported:{}');
+  if (!app.isPackaged) throw new Error('WASEL:startup-dev:{}');
+  app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args: ['--hidden'] });
+}
+
+// Clipboard reads can yield non-strings on some Windows setups (locked clipboard,
+// remote sessions); normalizing here keeps the monitor from throwing at startup.
+function readClipboardText() {
+  try {
+    const text = clipboard.readText();
+    return typeof text === 'string' ? text.trim() : '';
+  } catch {
+    return '';
   }
-  if (!app.isPackaged) {
-    throw new Error('ابدأ تشغيل واصل من النسخة المثبتة لتفعيل بدء التشغيل مع Windows.');
+}
+
+function startClipboardMonitor() {
+  lastClipboard = readClipboardText();
+  clipboardTimer = setInterval(() => {
+    if (!manager?.getState().settings.clipboardMonitor) return;
+    const text = readClipboardText();
+    if (!text || text === lastClipboard) return;
+    lastClipboard = text;
+    if (text.length > 4096 || /\s/.test(text) || !CLIPBOARD_LINK.test(text)) return;
+    if (manager.getState().downloads.some((item) => item.url === text)) return;
+    let name = text;
+    try {
+      name = decodeURIComponent(new URL(text).pathname.split('/').pop()) || text;
+    } catch {
+      // Keep the raw link as the label.
+    }
+    notify({
+      title: t('main.notify.clipboard'),
+      body: name,
+      onClick: () => presentIncoming({ urls: [text], source: 'clipboard' })
+    });
+  }, 1200);
+  clipboardTimer.unref();
+}
+
+// Unpacked extensions cannot load from inside app.asar, so the bundled extension is
+// copied to a stable folder the user can point the browser at. Updates refresh it.
+async function prepareExtensionFolders() {
+  const source = app.isPackaged ? path.join(process.resourcesPath, 'extension') : path.join(__dirname, '..', 'extension');
+  const root = path.join(app.getPath('userData'), 'browser-extension');
+  const chromium = path.join(root, 'chromium');
+  const firefox = path.join(root, 'firefox');
+  const skip = (file) => !/manifest\.firefox\.json$|INSTALL\.md$|tutorial/.test(file);
+  try {
+    await fs.cp(source, chromium, { recursive: true, force: true, filter: skip });
+    await fs.cp(source, firefox, { recursive: true, force: true, filter: skip });
+    await fs.copyFile(path.join(source, 'manifest.firefox.json'), path.join(firefox, 'manifest.json'));
+    extensionPaths = { chromium, firefox };
+  } catch {
+    extensionPaths = { chromium: source, firefox: source };
   }
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    path: process.execPath,
-    args: ['--hidden']
-  });
+}
+
+async function handleBridgeDownload(payload) {
+  const settings = manager.getState().settings;
+  if (settings.askBeforeCapture || payload.urls.length > 1 || payload.source === 'page') {
+    presentIncoming({ ...payload, source: 'browser' });
+    return { queued: false, confirm: true };
+  }
+  for (const url of payload.urls) {
+    await manager.add({
+      url,
+      fileName: payload.fileName,
+      referer: payload.referer,
+      cookies: payload.cookies,
+      userAgent: payload.userAgent,
+      totalBytes: payload.totalBytes,
+      mime: payload.mime,
+      source: 'browser'
+    });
+  }
+  notify({ title: t('main.notify.captured'), body: payload.fileName || payload.urls[0], onClick: showMainWindow });
+  return { queued: true, confirm: false };
+}
+
+function handle(channel, listener) {
+  ipcMain.handle(channel, (event, ...args) => listener(...args, event));
 }
 
 function registerIpc() {
-  ipcMain.handle('languages:list', async () => {
-    const resources = await Promise.all(SUPPORTED_LANGUAGES.map(async (code) => {
-      const locale = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'lang', `${code}.json`), 'utf8'));
-      return { code, name: locale.name, direction: locale.direction };
-    }));
-    return resources;
+  handle('app:info', () => ({
+    version: app.getVersion(),
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    material: supportsMica,
+    extensionPaths,
+    bridgePort: bridge?.port || null,
+    website: WEBSITE,
+    repository: REPOSITORY,
+    electron: process.versions.electron
+  }));
+  handle('app:ready', () => {
+    rendererReady = true;
+    const queued = pendingIncoming;
+    pendingIncoming = [];
+    for (const entry of queued) {
+      if (entry.protocol) processProtocolUrl(entry.protocol);
+      else send('downloads:incoming', entry);
+    }
   });
-  ipcMain.handle('languages:get', async (_event, code) => {
-    if (!isSupportedLanguage(code)) throw new Error('لغة الواجهة المحددة غير مدعومة.');
+  handle('languages:list', async () => Promise.all(SUPPORTED_LANGUAGES.map(async (code) => {
+    const locale = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'lang', `${code}.json`), 'utf8'));
+    return { code, name: locale.name, direction: locale.direction };
+  })));
+  handle('languages:get', async (code) => {
+    if (!isSupportedLanguage(code)) throw new Error('WASEL:invalid-setting:{"key":"language"}');
     return JSON.parse(await fs.readFile(path.join(__dirname, '..', 'lang', `${code}.json`), 'utf8'));
   });
-  ipcMain.handle('window:action', (event, action) => {
+  handle('window:action', (action, event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window) return;
+    if (!window) return null;
     if (action === 'minimize') window.minimize();
     else if (action === 'maximize') {
       if (window.isMaximized()) window.unmaximize();
@@ -291,121 +423,118 @@ function registerIpc() {
       return window.isMaximized();
     } else if (action === 'close') window.close();
     else if (action === 'quit') app.quit();
+    return null;
   });
-  ipcMain.handle('window:is-maximized', (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    return window?.isMaximized() ?? false;
+  handle('window:is-maximized', (event) => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
+
+  handle('updates:get-state', () => updates.state);
+  handle('updates:check', () => updates.check());
+  handle('updates:download', () => updates.download());
+  handle('updates:install', () => {
+    const installing = updates.install();
+    if (installing) isQuitting = true;
+    return installing;
   });
-  ipcMain.handle('updates:check', () => checkForUpdates());
-  ipcMain.handle('updates:get-status', () => updateStatus);
-  ipcMain.handle('updates:install', () => {
-    if (!updateDownloaded) throw new Error('لم يكتمل تنزيل تحديث جديد بعد.');
-    autoUpdater.quitAndInstall();
-  });
-  ipcMain.handle('downloads:get-state', () => manager.getState());
-  ipcMain.handle('downloads:add', (_event, input) => manager.add(input));
-  ipcMain.handle('downloads:pause', (_event, id) => manager.pause(id));
-  ipcMain.handle('downloads:resume', (_event, id) => manager.resume(id));
-  ipcMain.handle('downloads:cancel', (_event, id) => manager.cancel(id));
-  ipcMain.handle('downloads:remove', (_event, id) => manager.remove(id));
-  ipcMain.handle('downloads:remove-with-file', (_event, id) => manager.remove(id, { deleteFile: true }));
-  ipcMain.handle('downloads:clear-completed', () => manager.clearCompleted());
-  ipcMain.handle('downloads:pause-all', () => manager.pauseAll());
-  ipcMain.handle('downloads:resume-all', () => manager.resumeAll());
-  ipcMain.handle('downloads:stop-all', () => manager.pauseAll());
-  ipcMain.handle('downloads:update-settings', async (_event, settings) => {
-    const previous = manager.getState().settings.startWithWindows;
-    const changesStartup = settings.startWithWindows !== undefined
-      && settings.startWithWindows !== previous;
-    if (changesStartup && typeof settings.startWithWindows !== 'boolean') {
-      throw new Error('إعداد بدء التشغيل مع Windows غير صالح.');
+
+  handle('downloads:get-state', () => manager.getState());
+  handle('downloads:add', (input) => manager.add(input));
+  handle('downloads:probe', (input) => manager.probe(input));
+  handle('downloads:pause', (id) => manager.pause(id));
+  handle('downloads:resume', (id) => manager.resume(id));
+  handle('downloads:restart', (id) => manager.restart(id));
+  handle('downloads:cancel', (id) => manager.cancel(id));
+  handle('downloads:remove', (id, deleteFile) => manager.remove(id, { deleteFile: Boolean(deleteFile) }));
+  handle('downloads:clear-completed', () => manager.clearCompleted());
+  handle('downloads:pause-all', () => manager.pauseAll());
+  handle('downloads:resume-all', () => manager.resumeAll());
+  handle('downloads:hash', (id, algorithm) => manager.hash(id, algorithm));
+  handle('downloads:update-settings', async (changes) => {
+    const previous = manager.getState().settings;
+    if (typeof changes?.startWithWindows === 'boolean' && changes.startWithWindows !== previous.startWithWindows) {
+      setWindowsStartup(changes.startWithWindows);
     }
-    if (changesStartup) setWindowsStartup(settings.startWithWindows);
-    try {
-      return await manager.updateSettings(settings);
-    } catch (error) {
-      if (changesStartup) setWindowsStartup(previous);
-      throw error;
-    }
+    const settings = await manager.updateSettings(changes);
+    if (settings.theme !== previous.theme) nativeTheme.themeSource = settings.theme;
+    if (settings.language !== previous.language) await loadLocale(settings.language);
+    return settings;
   });
-  ipcMain.handle('downloads:choose-folder', async () => {
+  handle('downloads:choose-folder', async (defaultPath) => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory'],
-      defaultPath: manager.getState().settings.outputFolder
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: defaultPath || manager.getState().settings.outputFolder
     });
-    if (result.canceled || result.filePaths.length === 0) return null;
-    return manager.setOutputFolder(result.filePaths[0]);
+    return result.canceled ? null : result.filePaths[0];
   });
-  ipcMain.handle('downloads:open-file', async (_event, id) => {
+  handle('downloads:set-output-folder', (folder) => manager.setOutputFolder(folder));
+  handle('downloads:open-file', async (id) => {
     const item = manager.getDownload(id);
-    if (!item || item.status !== 'completed') throw new Error('الملف غير متاح للفتح.');
+    if (!item || item.status !== 'completed') throw new Error('WASEL:not-completed:{}');
     const error = await shell.openPath(item.savePath);
-    if (error) throw new Error(error);
+    if (error) throw new Error(`WASEL:open-failed:${JSON.stringify({ detail: error })}`);
   });
-  ipcMain.handle('downloads:show-file', (_event, id) => {
+  handle('downloads:show-file', async (id) => {
     const item = manager.getDownload(id);
-    if (!item) throw new Error('تعذر العثور على التنزيل.');
-    shell.showItemInFolder(item.savePath);
+    if (!item) throw new Error('WASEL:not-found:{}');
+    try {
+      await fs.access(item.savePath);
+      shell.showItemInFolder(item.savePath);
+    } catch {
+      await shell.openPath(path.dirname(item.savePath));
+    }
   });
-  ipcMain.handle('downloads:open-folder', async () => {
-    const error = await shell.openPath(manager.getState().settings.outputFolder);
-    if (error) throw new Error(error);
+  handle('downloads:open-folder', async (folder) => {
+    const error = await shell.openPath(folder || manager.getState().settings.outputFolder);
+    if (error) throw new Error(`WASEL:open-failed:${JSON.stringify({ detail: error })}`);
   });
-  ipcMain.handle('downloads:open-external', async (_event, url) => {
+  handle('app:open-external', async (url) => {
     const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('الرابط غير مسموح.');
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('WASEL:unsupported-protocol:{}');
     await shell.openExternal(parsed.href);
   });
-  ipcMain.handle('downloads:copy-text', (_event, text) => clipboard.writeText(String(text)));
-  ipcMain.handle('downloads:read-clipboard', () => clipboard.readText());
-  ipcMain.handle('downloads:export', async () => {
+  handle('app:copy-text', (text) => clipboard.writeText(String(text)));
+  handle('app:read-clipboard', () => clipboard.readText());
+  handle('downloads:export', async () => {
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'تصدير قائمة التنزيلات',
-      defaultPath: 'wasel-downloads.json',
-      filters: [{ name: 'JSON', extensions: ['json'] }]
+      title: t('main.export.title'),
+      defaultPath: `wasel-downloads-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }, { name: 'Text', extensions: ['txt'] }]
     });
     if (result.canceled || !result.filePath) return false;
-    await fs.writeFile(result.filePath, JSON.stringify(manager.getState(), null, 2), 'utf8');
+    const exported = manager.exportState();
+    const contents = /\.txt$/i.test(result.filePath)
+      ? exported.downloads.map((item) => item.url).join('\r\n')
+      : JSON.stringify(exported, null, 2);
+    await fs.writeFile(result.filePath, contents, 'utf8');
     return true;
   });
-  ipcMain.handle('downloads:import', async () => {
+  handle('downloads:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'استيراد قائمة التنزيلات',
+      title: t('main.import.title'),
       properties: ['openFile'],
-      filters: [{ name: 'JSON', extensions: ['json'] }]
+      filters: [{ name: 'Wasel / JSON / Text', extensions: ['json', 'txt'] }]
     });
-    if (result.canceled || result.filePaths.length === 0) return false;
-    const imported = JSON.parse(await fs.readFile(result.filePaths[0], 'utf8'));
-    if (!Array.isArray(imported.downloads)) throw new Error('ملف القائمة لا يحتوي على تنسيـق واصل صالح.');
-    for (const [index, item] of imported.downloads.entries()) {
-      if (!item || typeof item.url !== 'string' || typeof item.fileName !== 'string') {
-        throw new Error(`العنصر رقم ${index + 1} لا يحتوي على رابط واسم ملف صالحين.`);
-      }
-      let parsed;
+    if (result.canceled || !result.filePaths.length) return 0;
+    const raw = await fs.readFile(result.filePaths[0], 'utf8');
+    let entries;
+    try {
+      const parsed = JSON.parse(raw);
+      entries = Array.isArray(parsed.downloads) ? parsed.downloads : Array.isArray(parsed.items) ? parsed.items : null;
+    } catch {
+      entries = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => /^https?:\/\//i.test(line)).map((url) => ({ url }));
+    }
+    if (!entries?.length) throw new Error('WASEL:import-empty:{}');
+    let added = 0;
+    for (const entry of entries.slice(0, 5000)) {
+      if (!entry || typeof entry.url !== 'string') continue;
       try {
-        parsed = new URL(item.url);
+        await manager.add({ url: entry.url, fileName: typeof entry.fileName === 'string' ? entry.fileName : '', referer: entry.referer, startImmediately: false, source: 'import' });
+        added += 1;
       } catch {
-        throw new Error(`رابط العنصر رقم ${index + 1} غير صالح.`);
-      }
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw new Error(`بروتوكول العنصر رقم ${index + 1} غير مدعوم.`);
+        // Skip malformed rows and keep importing the rest.
       }
     }
-    for (const item of imported.downloads) {
-      await manager.add({ url: item.url, fileName: item.fileName, startImmediately: false });
-    }
-    return imported.downloads.length > 0;
+    return added;
   });
-  ipcMain.handle('app:get-version', () => app.getVersion());
-  ipcMain.handle('help:open', async () => {
-    const error = await shell.openPath(path.join(__dirname, '..', 'README.md'));
-    if (error) throw new Error(error);
-  });
-  ipcMain.handle('help:extension-guide', async () => {
-    const error = await shell.openPath(path.join(__dirname, '..', 'extension', 'INSTALL.md'));
-    if (error) throw new Error(error);
-  });
-  ipcMain.handle('app:get-extension-path', () => path.join(app.getAppPath(), 'extension'));
 }
 
 app.whenReady().then(async () => {
@@ -422,41 +551,67 @@ app.whenReady().then(async () => {
   manager = new DownloadManager({
     dataFile: path.join(dataDirectory, 'library.json'),
     defaultFolder: path.join(app.getPath('downloads'), 'Wasel'),
-    onChange: (state) => {
-      broadcast('downloads:changed', state);
-      updateTrayMenu(state);
-    }
+    onChange: onDownloadsChanged,
+    onEvent: onDownloadEvent,
+    resolveProxy: (url) => session.defaultSession.resolveProxy(url)
   });
   await manager.initialize();
-  if (manager.getState().settings.startWithWindows && app.isPackaged) {
-    setWindowsStartup(true);
+  const settings = manager.getState().settings;
+  nativeTheme.themeSource = settings.theme;
+  await loadLocale(settings.language);
+  if (settings.startWithWindows && app.isPackaged) {
+    try {
+      setWindowsStartup(true);
+    } catch {
+      // A failed refresh of the login item must not block startup.
+    }
   }
-  registerIpc();
-  createWindow();
-  createTray();
-  const startupUrl = process.argv.find((argument) => /^wasel:/i.test(argument));
-  if (startupUrl) pendingProtocolUrls.push(startupUrl);
-  for (const protocolUrl of pendingProtocolUrls) processProtocolUrl(protocolUrl);
-  pendingProtocolUrls = [];
+  await prepareExtensionFolders();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    showMainWindow();
+  updates = new UpdateService({ app, autoUpdater, getSettings: () => manager.getState().settings });
+  updates.on('state', (state) => send('updates:state', state));
+  updates.on('ready', (info) => notify({
+    title: t('main.notify.updateReady'),
+    body: t('main.notify.updateReadyBody', { version: info.version }),
+    onClick: () => {
+      showMainWindow();
+      send('app:open-settings', 'updates');
+    }
+  }));
+
+  bridge = createBridgeServer({
+    version: app.getVersion(),
+    onDownload: handleBridgeDownload,
+    getInfo: () => ({ askBeforeCapture: manager.getState().settings.askBeforeCapture })
   });
+  await bridge.start();
+
+  scheduler = new Scheduler({ manager });
+  scheduler.start();
+  registerIpc();
+  await createWindow();
+  createTray();
+  startClipboardMonitor();
+  updates.start();
+
+  const startupUrl = process.argv.find((argument) => /^wasel:/i.test(argument));
+  if (startupUrl) processProtocolUrl(startupUrl);
+
+  app.on('activate', showMainWindow);
 }).catch((error) => {
-  dialog.showErrorBox('تعذر تشغيل واصل', error.message);
-  app.quit();
+  dialog.showErrorBox('Wasel', error.stack || error.message);
+  app.exit(1);
 });
 
 app.on('before-quit', (event) => {
-  clearInterval(updateCheckTimer);
-  if (!manager || isClosing) return;
+  if (!manager || manager.shuttingDown) return;
   event.preventDefault();
-  isClosing = true;
-  manager.shutdown().then(() => app.quit()).catch((error) => {
-    dialog.showErrorBox('تعذر حفظ التنزيلات', error.message);
-    app.quit();
-  });
+  isQuitting = true;
+  clearInterval(clipboardTimer);
+  scheduler?.stop();
+  updates?.stop();
+  bridge?.stop();
+  manager.shutdown().catch(() => {}).finally(() => app.quit());
 });
 
 app.on('window-all-closed', () => {

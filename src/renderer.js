@@ -1,1063 +1,1837 @@
-const CATEGORY_LABELS = {
-  archives: 'ملفات مضغوطة',
-  documents: 'مستندات',
-  media: 'موسيقى وفيديو',
-  software: 'برامج',
-  images: 'صور',
-  other: 'أخرى'
-};
+'use strict';
 
-const STATUS_LABELS = {
-  queued: 'في قائمة الانتظار',
-  downloading: 'يستقبل البيانات...',
-  paused: 'متوقف مؤقتًا',
-  completed: 'مكتمل',
-  error: 'خطأ',
-  cancelled: 'ملغى'
-};
+const api = window.wasel;
+const Icons = window.WaselIcons;
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-window.WaselIcons.hydrate();
+const CATEGORY_ICONS = {
+  video: 'film', music: 'music', documents: 'doc-text', archives: 'archive', software: 'app', images: 'photo', other: 'doc'
+};
+const USER_AGENTS = {
+  firefox: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0',
+  edge: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0',
+  safari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/19.0 Safari/605.1.15'
+};
+const ACTIVE = new Set(['downloading', 'queued', 'verifying']);
+const RING = 2 * Math.PI * 10;
+const HISTORY = 120;
 
 const state = {
+  info: {},
   downloads: [],
-  settings: {
-    outputFolder: '',
-    theme: 'dark',
-    language: 'ara',
-    maxActiveDownloads: 3,
-    connectionsPerDownload: 4,
-    startWithWindows: false
-  },
-  locale: { name: 'العربية', locale: 'ar', direction: 'rtl', translations: {} },
+  settings: {},
+  stats: { speed: 0, active: 0, queued: 0, completed: 0, failed: 0 },
+  locale: { locale: 'ar', direction: 'rtl' },
+  t: (key) => key,
   filter: 'all',
-  category: '',
+  category: null,
   query: '',
-  sort: 'createdAt',
-  sortDirection: -1,
+  sort: { key: 'createdAt', dir: -1 },
   selected: new Set(),
-  contextId: null,
-  progressId: null,
-  scheduleTimer: null,
-  scheduleTarget: null
+  anchorId: null,
+  focusId: null,
+  inspectorOpen: readPreference('inspectorOpen', false),
+  speedHistory: [],
+  itemHistory: new Map(),
+  update: { status: 'idle' },
+  add: null,
+  numberFormat: new Intl.NumberFormat('en', { maximumFractionDigits: 1 }),
+  windowFocused: true
 };
 
-const rowsElement = document.getElementById('downloadRows');
-const backdrop = document.getElementById('modalBackdrop');
-const dialogs = [...document.querySelectorAll('.dialog')];
-const contextMenu = document.getElementById('contextMenu');
-let toastTimer;
-const originalTextNodes = new WeakMap();
-const originalAttributes = new WeakMap();
+const rows = new Map();
+let toastSeq = 0;
 
-function translate(text) {
-  return state.locale.translations?.[text] || text;
+function t(key, params) {
+  return state.t(key, params);
 }
 
-function applyTranslations() {
-  document.documentElement.lang = state.locale.locale || 'ar';
-  document.documentElement.dir = state.locale.direction || 'rtl';
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  let node;
-  while ((node = walker.nextNode())) {
-    if (!originalTextNodes.has(node)) originalTextNodes.set(node, node.nodeValue);
-    const original = originalTextNodes.get(node);
-    const trimmed = original.trim();
-    const translated = state.locale.translations?.[trimmed];
-    if (translated) {
-      const start = original.match(/^\s*/)?.[0] || '';
-      const end = original.match(/\s*$/)?.[0] || '';
-      node.nodeValue = `${start}${translated}${end}`;
-    } else {
-      node.nodeValue = original;
-    }
-  }
-
-  for (const element of document.querySelectorAll('[placeholder], [title], [aria-label]')) {
-    let original = originalAttributes.get(element);
-    if (!original) {
-      original = {};
-      originalAttributes.set(element, original);
-    }
-    for (const attribute of ['placeholder', 'title', 'aria-label']) {
-      if (!element.hasAttribute(attribute)) continue;
-      if (original[attribute] === undefined) original[attribute] = element.getAttribute(attribute);
-      const value = original[attribute];
-      element.setAttribute(attribute, state.locale.translations?.[value] || value);
-    }
+function readPreference(key, fallback) {
+  try {
+    const value = localStorage.getItem(`wasel.${key}`);
+    return value === null ? fallback : JSON.parse(value);
+  } catch {
+    return fallback;
   }
 }
 
-async function loadLocale(language) {
-  const locale = await window.wasel.getLanguage(language);
-  const fallback = ['ara', 'eng'].includes(language) ? null : await window.wasel.getLanguage('eng');
-  state.locale = fallback
-    ? { ...locale, translations: { ...fallback.translations, ...locale.translations } }
-    : locale;
-  state.settings.language = language;
-  applyTranslations();
+function writePreference(key, value) {
+  try {
+    localStorage.setItem(`wasel.${key}`, JSON.stringify(value));
+  } catch {
+    // Preferences are a convenience; private storage failures are harmless.
+  }
+}
+
+/* ---------- Localisation ---------- */
+
+async function loadLocale(code) {
+  const locale = await api.getLanguage(code);
+  const english = code === 'eng' ? null : await api.getLanguage('eng');
+  state.locale = locale;
+  state.t = window.WaselI18n.createTranslator({ ...locale, fallback: english?.messages });
+  state.numberFormat = new Intl.NumberFormat(locale.locale, { maximumFractionDigits: 1, numberingSystem: 'latn' });
+  document.documentElement.lang = locale.locale;
+  document.documentElement.dir = locale.direction;
+  applyStaticText();
+  buildDayPicker();
+  rows.clear();
+  $('#list').replaceChildren();
   render();
 }
 
-async function populateLanguageOptions() {
-  const languages = await window.wasel.listLanguages();
-  const selector = document.getElementById('languageSelect');
-  selector.replaceChildren(...languages.map((language) => {
-    const option = document.createElement('option');
-    option.value = language.code;
-    option.textContent = language.name;
-    return option;
-  }));
+function applyStaticText() {
+  for (const element of $$('[data-i18n]')) element.textContent = t(element.dataset.i18n);
+  for (const element of $$('[data-i18n-placeholder]')) element.placeholder = t(element.dataset.i18nPlaceholder);
+  for (const element of $$('[data-i18n-title]')) element.title = t(element.dataset.i18nTitle);
+  for (const element of $$('[data-i18n-aria]')) element.setAttribute('aria-label', t(element.dataset.i18nAria));
 }
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[character]);
+function errorKey(code, params = {}) {
+  if (code === 'http') {
+    const exact = `error.http-${params.status}`;
+    if (t(exact) !== exact) return exact;
+    if (params.status >= 500) return 'error.http-5xx';
+  }
+  const key = `error.${code}`;
+  return t(key) === key ? 'error.unknown' : key;
 }
+
+function errorText(error) {
+  if (!error) return '';
+  if (error.code) return t(errorKey(error.code, error.params), { detail: error.code, ...error.params });
+  const match = String(error.message || error).match(/WASEL:([\w-]+):(\{.*\})/);
+  if (match) {
+    let params = {};
+    try {
+      params = JSON.parse(match[2]);
+    } catch {
+      params = {};
+    }
+    return t(errorKey(match[1], params), { detail: match[1], ...params });
+  }
+  return t('error.unknown', { detail: String(error.message || error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '') });
+}
+
+/* ---------- Formatting ---------- */
 
 function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '—';
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / (1024 ** index)).toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** index;
+  const digits = index === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${new Intl.NumberFormat(state.locale.locale, { maximumFractionDigits: digits, minimumFractionDigits: index >= 2 ? Math.min(1, digits) : 0, numberingSystem: 'latn' }).format(value)} ${units[index]}`;
 }
 
-function formatRate(bytes) {
-  if (!bytes || bytes < 1) return '—';
+function formatSpeed(bytes) {
   return `${formatBytes(bytes)}/s`;
 }
 
-function formatEta(item) {
-  if (!item.speed || item.speed < 1 || !item.totalBytes) return '—';
-  const seconds = Math.max(0, Math.ceil((item.totalBytes - item.receivedBytes) / item.speed));
-  const units = state.locale.direction === 'rtl'
-    ? { seconds: 'ث', minutes: 'د', hours: 'س' }
-    : { seconds: 's', minutes: 'm', hours: 'h' };
-  if (seconds < 60) return `${seconds} ${units.seconds}`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} ${units.minutes} ${seconds % 60} ${units.seconds}`;
-  return `${Math.floor(seconds / 3600)} ${units.hours} ${Math.floor((seconds % 3600) / 60)} ${units.minutes}`;
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  seconds = Math.ceil(seconds);
+  if (seconds < 60) return t('time.seconds', { count: seconds });
+  if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return minutes < 10 && rest ? `${t('time.minutes', { count: minutes })} ${t('time.seconds', { count: rest })}` : t('time.minutes', { count: minutes });
+  }
+  const hours = Math.floor(seconds / 3600);
+  return `${t('time.hours', { count: hours })} ${t('time.minutes', { count: Math.floor((seconds % 3600) / 60) })}`;
 }
 
-function percent(item) {
+function dayBucket(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.valueOf())) return 'older';
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const diff = (start - date) / 86400000;
+  if (date >= start) return 'today';
+  if (diff <= 1) return 'yesterday';
+  if (diff <= 7) return 'week';
+  return 'older';
+}
+
+function formatDate(iso, { withTime = true } = {}) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.valueOf())) return '';
+  const bucket = dayBucket(iso);
+  const time = new Intl.DateTimeFormat(state.locale.locale, { hour: 'numeric', minute: '2-digit', numberingSystem: 'latn' }).format(date);
+  if (bucket === 'today') return withTime ? `${t('date.today')} ${time}` : t('date.today');
+  if (bucket === 'yesterday') return withTime ? `${t('date.yesterday')} ${time}` : t('date.yesterday');
+  const day = new Intl.DateTimeFormat(state.locale.locale, { day: 'numeric', month: 'short', year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric', numberingSystem: 'latn' }).format(date);
+  return withTime ? `${day} ${time}` : day;
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
+  }
+}
+
+function percentOf(item) {
   if (item.status === 'completed') return 100;
-  if (!item.totalBytes || item.totalBytes <= 0) return 0;
-  return Math.min(100, Math.max(0, Math.floor((item.receivedBytes / item.totalBytes) * 100)));
+  if (!item.totalBytes) return 0;
+  return Math.max(0, Math.min(100, (item.receivedBytes / item.totalBytes) * 100));
 }
 
-function iconFor(item) {
-  const icons = {
-    archives: 'archive', documents: 'document', media: 'media', software: 'software',
-    images: 'image', other: 'download'
+function extensionOf(name) {
+  const match = /\.([a-z0-9]{1,5})$/i.exec(name || '');
+  return match ? match[1].toLowerCase() : '';
+}
+
+function tileMarkup(item, large = false) {
+  const category = item.category || 'other';
+  const extension = extensionOf(item.fileName);
+  return `${Icons.markup(CATEGORY_ICONS[category] || 'doc')}${extension ? `<span class="ext">${escapeHtml(extension.slice(0, 4))}</span>` : ''}`;
+}
+
+function tileClass(item, large = false) {
+  return `file-tile kind-${item.category || 'other'}${large ? ' file-tile-lg' : ''}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+/* ---------- Filtering & grouping ---------- */
+
+function matchesFilter(item, filter = state.filter, category = state.category) {
+  if (category) return item.category === category;
+  switch (filter) {
+    case 'active': return item.status === 'downloading' || item.status === 'verifying';
+    case 'queued': return item.status === 'queued' || item.status === 'paused';
+    case 'completed': return item.status === 'completed';
+    case 'failed': return item.status === 'error';
+    default: return true;
+  }
+}
+
+function visibleItems() {
+  const query = state.query.toLocaleLowerCase();
+  const items = state.downloads.filter((item) => matchesFilter(item)
+    && (!query || `${item.fileName} ${item.url} ${hostOf(item.url)}`.toLocaleLowerCase().includes(query)));
+  const { key, dir } = state.sort;
+  const value = (item) => {
+    switch (key) {
+      case 'fileName': return item.fileName.toLocaleLowerCase();
+      case 'totalBytes': return item.totalBytes || 0;
+      case 'progress': return percentOf(item);
+      case 'status': return ['downloading', 'verifying', 'queued', 'paused', 'error', 'cancelled', 'completed'].indexOf(item.status);
+      default: return Date.parse(item.completedAt || item.createdAt) || 0;
+    }
   };
-  return icons[item.category] || icons.other;
-}
-
-function statusFor(item) {
-  if (item.status === 'downloading') return `${percent(item)}%`;
-  return STATUS_LABELS[item.status] || item.status;
-}
-
-function filterItems() {
-  let items = state.downloads.filter((item) => {
-    if (state.filter === 'unfinished' && ['completed', 'cancelled'].includes(item.status)) return false;
-    if (state.filter === 'completed' && item.status !== 'completed') return false;
-    if (state.filter === 'all' && state.category && item.category !== state.category) return false;
-    if (state.query) {
-      const query = state.query.toLocaleLowerCase(state.locale.locale || 'ar');
-      const text = `${item.fileName} ${item.url} ${item.status}`.toLocaleLowerCase(state.locale.locale || 'ar');
-      if (!text.includes(query)) return false;
-    }
-    return true;
+  return items.sort((a, b) => {
+    const left = value(a);
+    const right = value(b);
+    if (typeof left === 'string') return left.localeCompare(right, state.locale.locale) * dir;
+    return (left - right) * dir;
   });
-  items.sort((a, b) => {
-    let left = a[state.sort];
-    let right = b[state.sort];
-    if (state.sort === 'createdAt') {
-      left = Date.parse(left) || 0;
-      right = Date.parse(right) || 0;
-    }
-    if (typeof left === 'string') return left.localeCompare(right, state.locale.locale || 'ar') * state.sortDirection;
-    return ((Number(left) || 0) - (Number(right) || 0)) * state.sortDirection;
-  });
-  return items;
 }
 
-window.wasel.onUpdateStatus(renderUpdateStatus);
+function buildEntries(items) {
+  const grouped = state.sort.key === 'createdAt' && !state.query && ['all', 'completed'].includes(state.filter) && !state.category;
+  if (!grouped) return items.map((item) => ({ type: 'item', key: item.id, item }));
+  const entries = [];
+  const pending = items.filter((item) => item.status !== 'completed');
+  const done = items.filter((item) => item.status === 'completed');
+  if (pending.length && done.length) entries.push({ type: 'header', key: 'h-progress', label: t('group.inProgress'), count: pending.length });
+  for (const item of pending) entries.push({ type: 'item', key: item.id, item });
+  let bucket = null;
+  for (const item of done) {
+    const current = dayBucket(item.completedAt || item.createdAt);
+    if (current !== bucket) {
+      bucket = current;
+      entries.push({ type: 'header', key: `h-${current}`, label: t(`group.${current}`), count: done.filter((entry) => dayBucket(entry.completedAt || entry.createdAt) === current).length });
+    }
+    entries.push({ type: 'item', key: item.id, item });
+  }
+  return entries;
+}
+
+/* ---------- List rendering ---------- */
+
+function createRow(id) {
+  const element = document.createElement('div');
+  element.className = 'row-item';
+  element.dataset.id = id;
+  element.setAttribute('role', 'option');
+  element.tabIndex = -1;
+  element.innerHTML = `
+    <div class="file-tile"></div>
+    <div class="row-main">
+      <div class="row-name"><strong dir="auto"></strong><span class="badges"></span></div>
+      <div class="row-meta"></div>
+      <div class="progress"><span></span></div>
+    </div>
+    <div class="row-actions">
+      <button type="button" class="ring-button" data-row-action="primary">
+        <svg class="ring" viewBox="0 0 24 24"><circle class="ring-track" cx="12" cy="12" r="10" fill="none" stroke-width="2"/><circle class="ring-value" cx="12" cy="12" r="10" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="${RING}" stroke-dashoffset="${RING}"/></svg>
+        <span class="glyph"></span>
+      </button>
+      <button type="button" class="icon-button" data-row-action="menu">${Icons.markup('ellipsis')}</button>
+    </div>`;
+  return element;
+}
+
+function rowMeta(item) {
+  const parts = [];
+  const sep = '<span class="sep">·</span>';
+  const size = item.totalBytes ? formatBytes(item.totalBytes) : '';
+  switch (item.status) {
+    case 'downloading': {
+      if (item.retry) {
+        const seconds = Math.max(0, Math.ceil((item.retry.at - Date.now()) / 1000));
+        return { html: escapeHtml(t('meta.retrying', { seconds, attempt: item.retry.attempt, max: item.retry.max })), tone: 'warn' };
+      }
+      parts.push(item.totalBytes
+        ? escapeHtml(t('meta.ofTotal', { received: formatBytes(item.receivedBytes), total: size }))
+        : escapeHtml(formatBytes(item.receivedBytes)));
+      if (item.speed) parts.push(`<bdi>${escapeHtml(formatSpeed(item.speed))}</bdi>`);
+      if (item.speed && item.totalBytes) parts.push(escapeHtml(t('meta.left', { time: formatDuration((item.totalBytes - item.receivedBytes) / item.speed) })));
+      if (!item.speed && !item.receivedBytes) parts.push(escapeHtml(t('meta.connecting')));
+      break;
+    }
+    case 'verifying':
+      parts.push(escapeHtml(t('status.verifying')));
+      break;
+    case 'queued':
+      parts.push(escapeHtml(t('status.queued')));
+      if (size) parts.push(escapeHtml(size));
+      break;
+    case 'paused':
+      parts.push(escapeHtml(t('status.paused')));
+      if (item.totalBytes) parts.push(escapeHtml(t('meta.ofTotal', { received: formatBytes(item.receivedBytes), total: size })));
+      else if (item.receivedBytes) parts.push(escapeHtml(formatBytes(item.receivedBytes)));
+      break;
+    case 'cancelled':
+      parts.push(escapeHtml(t('status.cancelled')));
+      break;
+    case 'error':
+      return { html: escapeHtml(errorText(item.error) || t('status.error')), tone: 'error' };
+    case 'completed':
+      if (size) parts.push(escapeHtml(size));
+      if (hostOf(item.url)) parts.push(`<bdi>${escapeHtml(hostOf(item.url))}</bdi>`);
+      parts.push(escapeHtml(formatDate(item.completedAt || item.createdAt)));
+      break;
+    default:
+      parts.push(escapeHtml(item.status));
+  }
+  return { html: parts.join(sep), tone: '' };
+}
+
+function badgesFor(item) {
+  const badges = [];
+  if (item.checksum?.ok === true) badges.push(`<span class="badge badge-ok">${Icons.markup('shield')}${escapeHtml(t('badge.verified'))}</span>`);
+  if (item.checksum?.ok === false) badges.push(`<span class="badge badge-warn">${Icons.markup('alert')}${escapeHtml(t('badge.mismatch'))}</span>`);
+  if (item.hasCookies && item.status !== 'completed') badges.push(`<span class="badge" title="${escapeHtml(t('badge.sessionTitle'))}">${Icons.markup('lock')}</span>`);
+  return badges.join('');
+}
+
+function updateRow(element, item) {
+  const meta = rowMeta(item);
+  const percent = percentOf(item);
+  const signature = [item.status, item.fileName, item.category, meta.html, Math.round(percent * 10), item.retry?.attempt, badgesFor(item).length, state.selected.has(item.id)].join('|');
+  if (element._signature === signature) return;
+  element._signature = signature;
+  element.className = `row-item status-${item.status}${state.selected.has(item.id) ? ' selected' : ''}`;
+  element.setAttribute('aria-selected', String(state.selected.has(item.id)));
+  const tile = element.children[0];
+  const tileKey = `${item.category}|${extensionOf(item.fileName)}`;
+  if (tile._key !== tileKey) {
+    tile._key = tileKey;
+    tile.className = tileClass(item);
+    tile.innerHTML = tileMarkup(item);
+  }
+  const name = $('.row-name strong', element);
+  if (name.textContent !== item.fileName) {
+    name.textContent = item.fileName;
+    name.title = item.fileName;
+  }
+  $('.badges', element).innerHTML = badgesFor(item);
+  const metaElement = $('.row-meta', element);
+  metaElement.innerHTML = meta.html;
+  metaElement.className = `row-meta${meta.tone ? ` ${meta.tone}` : ''}`;
+  const progress = $('.progress', element);
+  const showProgress = ['downloading', 'paused', 'queued', 'verifying'].includes(item.status) && (item.totalBytes > 0 || item.status === 'downloading');
+  progress.hidden = !showProgress;
+  progress.classList.toggle('indeterminate', item.status === 'downloading' && !item.totalBytes || item.status === 'verifying');
+  progress.firstElementChild.style.width = `${percent}%`;
+
+  const button = $('[data-row-action="primary"]', element);
+  const ring = $('.ring', button);
+  const glyph = $('.glyph', button);
+  let glyphName;
+  let title;
+  if (ACTIVE.has(item.status)) {
+    glyphName = item.status === 'verifying' ? 'hash' : 'pause';
+    title = t('action.pause');
+    ring.style.display = '';
+    $('.ring-value', ring).style.strokeDashoffset = String(RING * (1 - percent / 100));
+    button.classList.remove('idle');
+  } else {
+    ring.style.display = 'none';
+    button.classList.add('idle');
+    if (item.status === 'completed') {
+      glyphName = 'folder-search';
+      title = t('action.showInFolder');
+    } else {
+      glyphName = 'retry';
+      title = item.status === 'error' ? t('action.retry') : t('action.resume');
+    }
+  }
+  if (glyph._name !== glyphName) {
+    glyph._name = glyphName;
+    glyph.innerHTML = Icons.markup(glyphName, 'glyph-icon');
+  }
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.classList.add('persistent');
+  $('[data-row-action="menu"]', element).title = t('action.more');
+}
+
+function createHeader(entry) {
+  const element = document.createElement('div');
+  element.className = 'section-header';
+  element.dataset.key = entry.key;
+  return element;
+}
+
+function renderList() {
+  const list = $('#list');
+  const items = visibleItems();
+  const entries = buildEntries(items);
+  const keep = new Set();
+  const ordered = [];
+  for (const entry of entries) {
+    keep.add(entry.key);
+    let element = rows.get(entry.key);
+    if (!element) {
+      element = entry.type === 'header' ? createHeader(entry) : createRow(entry.key);
+      rows.set(entry.key, element);
+    }
+    if (entry.type === 'header') {
+      const html = `${escapeHtml(entry.label)} <span>${entry.count}</span>`;
+      if (element.innerHTML !== html) element.innerHTML = html;
+    } else {
+      updateRow(element, entry.item);
+    }
+    ordered.push(element);
+  }
+  for (const [key, element] of rows) {
+    if (!keep.has(key)) {
+      element.remove();
+      rows.delete(key);
+    }
+  }
+  let cursor = list.firstElementChild;
+  for (const element of ordered) {
+    if (element !== cursor) list.insertBefore(element, cursor);
+    else cursor = cursor.nextElementSibling;
+  }
+  const empty = !items.length;
+  $('#emptyState').hidden = !empty;
+  if (empty) renderEmpty();
+  for (const id of [...state.selected]) {
+    if (!state.downloads.some((item) => item.id === id)) state.selected.delete(id);
+  }
+}
+
+function renderEmpty() {
+  const key = state.query ? 'search' : state.category ? 'category' : state.filter;
+  $('#emptyTitle').textContent = t(`empty.${key}.title`, { query: state.query });
+  $('#emptyBody').textContent = t(`empty.${key}.body`, { query: state.query });
+  $('.empty-actions').hidden = key !== 'all';
+  $('.empty-tips').hidden = key !== 'all' || state.downloads.length > 0;
+}
+
+function renderSidebar() {
+  const counts = { all: state.downloads.length, active: 0, queued: 0, completed: 0, failed: 0 };
+  for (const item of state.downloads) {
+    for (const filter of ['active', 'queued', 'completed', 'failed']) if (matchesFilter(item, filter, null)) counts[filter] += 1;
+    counts[item.category] = (counts[item.category] || 0) + 1;
+  }
+  for (const element of $$('[data-count]')) {
+    const value = counts[element.dataset.count] || 0;
+    element.textContent = value ? String(value) : '';
+  }
+  for (const element of $$('.nav-item')) {
+    element.classList.toggle('selected', state.category ? element.dataset.category === state.category : element.dataset.filter === state.filter && !element.dataset.category);
+  }
+  $('#speedValue').textContent = formatSpeed(state.stats.speed);
+  const meta = [];
+  if (state.stats.active) meta.push(t('speed.active', { count: state.stats.active }));
+  if (state.stats.queued) meta.push(t('speed.queued', { count: state.stats.queued }));
+  $('#speedMeta').textContent = meta.length ? meta.join(' · ') : t('speed.idle');
+  const limit = state.settings.speedLimit || 0;
+  const turbo = Boolean(state.settings.turbo);
+  $('#turboChip').classList.toggle('on', turbo);
+  $('.speed-card').classList.toggle('turbo', turbo);
+  $('#limitChip').hidden = turbo;
+  $('#limitChip').classList.toggle('on', limit > 0);
+  $('#limitLabel').textContent = limit ? formatSpeed(limit) : t('speed.unlimited');
+  drawSpeedGraph();
+}
+
+function renderToolbar() {
+  const title = state.category ? t(`category.${state.category}`) : t(`filter.${state.filter}`);
+  $('#viewTitle').textContent = title;
+  const items = visibleItems();
+  const total = items.reduce((sum, item) => sum + (item.totalBytes || 0), 0);
+  $('#viewSubtitle').textContent = items.length
+    ? `${t('count.items', { count: items.length })}${total ? ` · ${formatBytes(total)}` : ''}`
+    : '';
+  document.title = state.stats.active ? `${formatSpeed(state.stats.speed)} — ${t('app.name')}` : t('app.name');
+  $('#inspectorToggle').classList.toggle('active', state.inspectorOpen);
+  const anyActive = state.downloads.some((item) => ACTIVE.has(item.status));
+  const anyResumable = state.downloads.some((item) => ['paused', 'error'].includes(item.status));
+  $('[data-command="pause-all"]').disabled = !anyActive;
+  $('[data-command="resume-all"]').disabled = !anyResumable;
+}
+
+function renderSelectionBar() {
+  const count = state.selected.size;
+  $('#selectionBar').hidden = count < 2;
+  if (count >= 2) $('#selectionCount').textContent = t('count.selected', { count });
+}
+
+function render() {
+  renderList();
+  renderSidebar();
+  renderToolbar();
+  renderSelectionBar();
+  renderInspector();
+}
+
+/* ---------- Graphs ---------- */
+
+function cssColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#0071e3';
+}
+
+function withAlpha(color, alpha) {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color);
+  if (!hex) return color;
+  const value = hex[1].length === 3 ? hex[1].replace(/./g, '$&$&') : hex[1];
+  const [r, g, b] = [0, 2, 4].map((offset) => parseInt(value.slice(offset, offset + 2), 16));
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function prepareCanvas(canvas) {
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) return null;
+  if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+  }
+  const context = canvas.getContext('2d');
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  return { context, width, height };
+}
+
+function drawSparkline(canvas, values) {
+  const prepared = prepareCanvas(canvas);
+  if (!prepared) return;
+  const { context, width, height } = prepared;
+  const accent = cssColor('--accent');
+  const max = Math.max(64 * 1024, ...values) * 1.15;
+  const step = width / (HISTORY - 1);
+  const rtl = document.documentElement.dir === 'rtl';
+  const x = (index) => {
+    const position = width - (values.length - 1 - index) * step;
+    return rtl ? width - position : position;
+  };
+  const y = (value) => height - 2 - (value / max) * (height - 6);
+  context.strokeStyle = cssColor('--separator');
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(0, height - 0.5);
+  context.lineTo(width, height - 0.5);
+  context.stroke();
+  if (values.length < 2) return;
+  const gradient = context.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, withAlpha(accent, 0.3));
+  gradient.addColorStop(1, withAlpha(accent, 0));
+  context.beginPath();
+  context.moveTo(x(0), height);
+  values.forEach((value, index) => context.lineTo(x(index), y(value)));
+  context.lineTo(x(values.length - 1), height);
+  context.closePath();
+  context.fillStyle = gradient;
+  context.fill();
+  context.beginPath();
+  values.forEach((value, index) => (index ? context.lineTo(x(index), y(value)) : context.moveTo(x(index), y(value))));
+  context.strokeStyle = accent;
+  context.lineWidth = 1.6;
+  context.lineJoin = 'round';
+  context.stroke();
+}
+
+function drawSpeedGraph() {
+  drawSparkline($('#speedGraph'), state.speedHistory);
+}
+
+function drawSegments(canvas, item) {
+  const prepared = prepareCanvas(canvas);
+  if (!prepared) return;
+  const { context, width, height } = prepared;
+  const accent = cssColor('--accent');
+  const rtl = document.documentElement.dir === 'rtl';
+  const radius = 5;
+  context.save();
+  context.beginPath();
+  context.roundRect(0, 0, width, height, radius);
+  context.clip();
+  context.fillStyle = cssColor('--track');
+  context.fillRect(0, 0, width, height);
+  const paint = (from, to, color) => {
+    const left = rtl ? width - to : from;
+    context.fillStyle = color;
+    context.fillRect(left, 0, Math.max(0, to - from), height);
+  };
+  if (item.status === 'completed') {
+    paint(0, width, accent);
+  } else if (item.segments?.length && item.totalBytes) {
+    for (const [start, end, done, active] of item.segments) {
+      const from = (start / item.totalBytes) * width;
+      const to = ((end + 1) / item.totalBytes) * width;
+      const filled = from + ((done / (end - start + 1)) * (to - from));
+      paint(from, filled, accent);
+      if (active && filled < to) paint(Math.max(from, filled - 2), filled, '#ffffff');
+      context.fillStyle = cssColor('--window');
+      context.fillRect(rtl ? width - to : to - 1, 0, 1, height);
+    }
+  } else if (item.totalBytes) {
+    paint(0, (item.receivedBytes / item.totalBytes) * width, accent);
+  }
+  context.restore();
+}
+
+/* ---------- Inspector ---------- */
+
+function inspectorItem() {
+  const id = state.focusId && state.selected.has(state.focusId) ? state.focusId : [...state.selected].at(-1);
+  return state.downloads.find((item) => item.id === id) || null;
+}
+
+function infoRow(label, value, { html = false, mono = false } = {}) {
+  if (value === '' || value === null || value === undefined) return '';
+  return `<div><dt>${escapeHtml(label)}</dt><dd${mono ? ' class="mono"' : ''}>${html ? value : escapeHtml(value)}</dd></div>`;
+}
+
+function renderInspector() {
+  const panel = $('#inspector');
+  panel.hidden = !state.inspectorOpen;
+  if (!state.inspectorOpen) return;
+  const item = inspectorItem();
+  $('#inspectorEmpty').hidden = Boolean(item);
+  $('#inspectorContent').hidden = !item;
+  if (!item) return;
+
+  const tile = $('#inspectorTile');
+  const tileKey = `${item.id}|${item.category}|${item.fileName}`;
+  if (tile._key !== tileKey) {
+    tile._key = tileKey;
+    tile.className = tileClass(item, true);
+    tile.innerHTML = tileMarkup(item, true);
+  }
+  $('#inspectorName').textContent = item.fileName;
+  $('#inspectorKind').textContent = [t(`category.${item.category || 'other'}`), item.totalBytes ? formatBytes(item.totalBytes) : ''].filter(Boolean).join(' · ');
+  const percent = percentOf(item);
+  $('#inspectorBar').style.width = `${percent}%`;
+  $('#inspectorBar').parentElement.className = `progress status-${item.status}`;
+  $('#inspectorPercent').textContent = `${state.numberFormat.format(Math.floor(percent))}%`;
+  $('#inspectorRate').textContent = item.status === 'downloading' && item.speed ? formatSpeed(item.speed) : '';
+
+  const segments = item.segments || [];
+  const showSegments = ['downloading', 'paused', 'queued'].includes(item.status) || item.status === 'completed';
+  $('#segmentsGroup').hidden = !showSegments;
+  if (showSegments) {
+    const activeCount = segments.filter((segment) => segment[3]).length;
+    $('#segmentsCount').textContent = segments.length ? t('inspector.segments', { active: activeCount, count: segments.length }) : '';
+    drawSegments($('#segmentMap'), item);
+    const history = state.itemHistory.get(item.id) || [];
+    $('#itemGraph').hidden = !history.length || item.status === 'completed';
+    if (history.length) drawSparkline($('#itemGraph'), history);
+  }
+
+  const remaining = item.speed && item.totalBytes ? formatDuration((item.totalBytes - item.receivedBytes) / item.speed) : '';
+  const checksum = item.checksum
+    ? `${item.checksum.algorithm.toUpperCase()} — ${item.checksum.ok === true ? t('badge.verified') : item.checksum.ok === false ? t('badge.mismatch') : t('inspector.pending')}`
+    : '';
+  $('#infoList').innerHTML = [
+    infoRow(t('inspector.status'), item.status === 'error' ? errorText(item.error) : t(`status.${item.status}`)),
+    infoRow(t('inspector.size'), item.totalBytes ? formatBytes(item.totalBytes) : t('inspector.unknown')),
+    item.status !== 'completed' ? infoRow(t('inspector.downloaded'), formatBytes(item.receivedBytes)) : '',
+    item.status === 'downloading' ? infoRow(t('inspector.speed'), formatSpeed(item.speed || 0)) : '',
+    remaining ? infoRow(t('inspector.timeLeft'), remaining) : '',
+    infoRow(t('inspector.resumable'), item.resumable === true ? t('common.yes') : item.resumable === false ? t('common.no') : t('inspector.unknown')),
+    infoRow(t('inspector.source'), hostOf(item.finalUrl || item.url)),
+    item.referer ? infoRow(t('inspector.referer'), item.referer, { mono: true }) : '',
+    infoRow(t('inspector.added'), formatDate(item.createdAt)),
+    item.completedAt ? infoRow(t('inspector.completed'), formatDate(item.completedAt)) : '',
+    infoRow(t('inspector.savedTo'), `<a data-inspector-link="show" dir="ltr">${escapeHtml(item.savePath)}</a>`, { html: true }),
+    infoRow(t('inspector.link'), `<a data-inspector-link="copy" dir="ltr" title="${escapeHtml(t('action.copyLink'))}">${escapeHtml(item.url)}</a>`, { html: true }),
+    checksum ? infoRow(t('inspector.checksum'), checksum) : '',
+    item.hash ? infoRow('SHA-256', item.hash, { mono: true }) : ''
+  ].join('');
+
+  const completed = item.status === 'completed';
+  $('[data-inspector="open"]').hidden = !completed;
+  $('[data-inspector="hash"]').hidden = !completed;
+  $('[data-inspector="restart"]').hidden = ACTIVE.has(item.status);
+}
+
+/* ---------- Selection ---------- */
+
+function selectOnly(id) {
+  state.selected = new Set([id]);
+  state.anchorId = id;
+  state.focusId = id;
+}
+
+function handleRowClick(event, id) {
+  const ids = visibleItems().map((item) => item.id);
+  if (event.shiftKey && state.anchorId && ids.includes(state.anchorId)) {
+    const [from, to] = [ids.indexOf(state.anchorId), ids.indexOf(id)].sort((a, b) => a - b);
+    if (!event.ctrlKey && !event.metaKey) state.selected.clear();
+    for (const entry of ids.slice(from, to + 1)) state.selected.add(entry);
+    state.focusId = id;
+  } else if (event.ctrlKey || event.metaKey) {
+    if (state.selected.has(id)) state.selected.delete(id);
+    else state.selected.add(id);
+    state.anchorId = id;
+    state.focusId = id;
+  } else {
+    selectOnly(id);
+  }
+  render();
+}
+
+function moveSelection(delta, extend) {
+  const ids = visibleItems().map((item) => item.id);
+  if (!ids.length) return;
+  const current = ids.indexOf(state.focusId);
+  const next = ids[Math.max(0, Math.min(ids.length - 1, current === -1 ? 0 : current + delta))];
+  if (extend) {
+    state.selected.add(next);
+    state.focusId = next;
+  } else {
+    selectOnly(next);
+  }
+  render();
+  rows.get(next)?.scrollIntoView({ block: 'nearest' });
+}
 
 function selectedItems() {
   return state.downloads.filter((item) => state.selected.has(item.id));
 }
 
-function fileRow(item) {
-  const host = (() => {
-    try { return new URL(item.url).host; } catch { return ''; }
-  })();
-  const date = new Date(item.createdAt);
-  const validDate = !Number.isNaN(date.valueOf());
-  const isSelected = state.selected.has(item.id);
-  return `<tr data-id="${escapeHtml(item.id)}" class="status-${escapeHtml(item.status)} ${isSelected ? 'selected' : ''}" aria-selected="${isSelected}">
-    <td class="select-cell"><input type="checkbox" data-select-row="${escapeHtml(item.id)}" aria-label="${escapeHtml(translate('تحديد'))} ${escapeHtml(item.fileName)}" ${isSelected ? 'checked' : ''}></td>
-    <td class="name-cell" title="${escapeHtml(item.fileName)}"><div class="file-cell">${window.WaselIcons.markup(iconFor(item), 'file-type-icon')}<b class="file-name">${escapeHtml(item.fileName)}</b></div></td>
-    <td class="queue-cell"><span class="queue-mark" title="قائمة التنزيل الرئيسية">▤</span></td>
-    <td class="size-cell" data-value="${Number(item.totalBytes) || 0}">${formatBytes(item.totalBytes)}</td>
-    <td class="status-cell" title="${escapeHtml(item.error || STATUS_LABELS[item.status] || '')}">${escapeHtml(statusFor(item))}</td>
-    <td class="time-cell">${item.status === 'downloading' ? formatEta(item) : '—'}</td>
-    <td class="rate-cell">${item.status === 'downloading' ? formatRate(item.speed) : '—'}</td>
-    <td class="date-cell" title="${validDate ? date.toLocaleString(state.locale.locale) : ''}">${validDate ? date.toLocaleDateString(state.locale.locale) : '—'}</td>
-    <td title="${escapeHtml(item.error || host)}">${escapeHtml(item.error || host)}</td>
-  </tr>`;
-}
+/* ---------- Actions ---------- */
 
-function renderTableRows() {
-  const items = filterItems();
-  if (!items.length) {
-    rowsElement.innerHTML = '';
-    return;
-  }
-  const tableWrap = document.getElementById('tableWrap');
-  const rowHeight = 23;
-  const first = Math.max(0, Math.floor(tableWrap.scrollTop / rowHeight) - 2);
-  const count = Math.ceil(tableWrap.clientHeight / rowHeight) + 8;
-  const last = Math.min(items.length, first + count);
-  const topSpace = first * rowHeight;
-  const bottomSpace = Math.max(0, (items.length - last) * rowHeight);
-  rowsElement.innerHTML = `${topSpace ? `<tr class="virtual-spacer"><td colspan="9" style="height:${topSpace}px"></td></tr>` : ''}${items.slice(first, last).map(fileRow).join('')}${bottomSpace ? `<tr class="virtual-spacer"><td colspan="9" style="height:${bottomSpace}px"></td></tr>` : ''}`;
-}
-
-function updateSelectionUI() {
-  const items = filterItems();
-  rowsElement.querySelectorAll('tr[data-id]').forEach((row) => {
-    const selected = state.selected.has(row.dataset.id);
-    row.classList.toggle('selected', selected);
-    row.setAttribute('aria-selected', String(selected));
-    const checkbox = row.querySelector('[data-select-row]');
-    if (checkbox) checkbox.checked = selected;
-  });
-  document.getElementById('selectAll').checked = items.length > 0 && items.every((item) => state.selected.has(item.id));
-  document.getElementById('selectionSummary').textContent = state.selected.size
-    ? `${translate('تم تحديد')} ${state.selected.size} ${translate('ملف')}`
-    : translate('لم يتم تحديد أي ملف');
-  updateActionStates();
-}
-
-function render() {
-  const items = filterItems();
-  renderTableRows();
-  const empty = document.getElementById('emptyState');
-  empty.hidden = items.length > 0;
-  document.getElementById('tableTotal').textContent = String(items.length);
-  document.getElementById('countAll').textContent = String(state.downloads.length);
-  document.getElementById('countCompleted').textContent = String(state.downloads.filter((item) => item.status === 'completed').length);
-  document.getElementById('countUnfinished').textContent = String(state.downloads.filter((item) => !['completed', 'cancelled'].includes(item.status)).length);
-  document.getElementById('countQueue').textContent = String(state.downloads.filter((item) => item.status === 'queued' || item.status === 'downloading').length);
-  document.querySelectorAll('[data-count-category]').forEach((element) => {
-    element.textContent = String(state.downloads.filter((item) => item.category === element.dataset.countCategory).length);
-  });
-
-  const active = state.downloads.filter((item) => item.status === 'downloading');
-  const queued = state.downloads.filter((item) => item.status === 'queued').length;
-  const completed = state.downloads.filter((item) => item.status === 'completed').length;
-  const totalSpeed = active.reduce((sum, item) => sum + (item.speed || 0), 0);
-  document.getElementById('statusCounts').textContent =
-    `${state.downloads.length} ${translate('التنزيلات')} · ${active.length} ${translate('نشط')} · ${completed} ${translate('مكتمل')}`;
-  document.getElementById('statusFolder').textContent = state.settings.outputFolder || '—';
-  document.getElementById('statusFolder').title = state.settings.outputFolder || '';
-  document.getElementById('statusSpeed').textContent = `↓ ${formatRate(totalSpeed) === '—' ? '0 KB/s' : formatRate(totalSpeed)}`;
-  document.getElementById('statusLimiter').textContent = `${translate('قيد الانتظار')}: ${queued}`;
-  document.title = `${state.downloads.length} ${translate('التنزيلات')} — ${translate('عنوان التطبيق')}`;
-  updateSelectionUI();
-  updateProgressDialog();
-  applyTranslations();
-}
-
-function setSelection(id, selected) {
-  if (selected) state.selected.add(id);
-  else state.selected.delete(id);
-  updateSelectionUI();
-}
-
-function updateActionStates() {
-  const chosen = selectedItems();
-  const hasSelection = chosen.length > 0;
-  const canResume = chosen.some((item) => ['paused', 'error', 'cancelled'].includes(item.status));
-  const canPause = chosen.some((item) => ['downloading', 'queued'].includes(item.status));
-  const canDeleteCompleted = state.downloads.some((item) => item.status === 'completed');
-  document.querySelectorAll('[data-command="resume-selected"]').forEach((button) => { button.disabled = !canResume; });
-  document.querySelectorAll('[data-command="pause-selected"]').forEach((button) => { button.disabled = !canPause; });
-  document.querySelectorAll('[data-command="delete"]').forEach((button) => { button.disabled = !hasSelection; });
-  document.querySelectorAll('[data-command="clear-completed"]').forEach((button) => { button.disabled = !canDeleteCompleted; });
-  document.querySelectorAll('[data-command="stop-all"]').forEach((button) => {
-    button.disabled = !state.downloads.some((item) => item.status === 'downloading' || item.status === 'queued');
-  });
-  document.querySelectorAll('[data-command="open"], [data-command="show"], [data-command="copy-url"]').forEach((button) => {
-    button.disabled = !hasSelection;
-  });
-  const contextItem = state.downloads.find((item) => item.id === state.contextId);
-  const contextResume = contextMenu.querySelector('[data-context="resume"]');
-  const contextPause = contextMenu.querySelector('[data-context="pause"]');
-  const contextCancel = contextMenu.querySelector('[data-context="cancel"]');
-  const contextOpen = contextMenu.querySelector('[data-context="open"]');
-  if (contextResume) contextResume.disabled = !contextItem || !['paused', 'error', 'cancelled'].includes(contextItem.status);
-  if (contextPause) contextPause.disabled = !contextItem || !['downloading', 'queued'].includes(contextItem.status);
-  if (contextCancel) contextCancel.disabled = !contextItem || !['downloading', 'queued'].includes(contextItem.status);
-  if (contextOpen) contextOpen.disabled = !contextItem;
-}
-
-function setFilter(filter, category = '') {
-  state.filter = filter;
-  state.category = category;
-  state.selected.clear();
-  document.getElementById('tableWrap').scrollTop = 0;
-  document.querySelectorAll('.tree-item').forEach((item) => {
-    const active = category
-      ? item.dataset.category === category
-      : item.dataset.filter === filter && !item.dataset.category;
-    item.classList.toggle('selected', active);
-  });
-  const title = category
-    ? CATEGORY_LABELS[category]
-    : ({ all: 'كل التنزيلات', unfinished: 'التنزيلات غير المكتملة', completed: 'التنزيلات المكتملة' }[filter] || 'كل التنزيلات');
-  document.getElementById('tableTitle').textContent = title;
-  render();
-}
-
-function setState(nextState) {
-  state.downloads = nextState.downloads;
-  state.settings = nextState.settings;
-  document.body.dataset.theme = state.settings.theme || 'light';
-  render();
-}
-
-function showToast(message, type = '') {
-  const toast = document.getElementById('toast');
-  toast.textContent = message;
-  toast.className = `toast visible ${type}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.className = 'toast'; }, 3000);
-}
-
-function renderUpdateStatus(status) {
-  const message = document.getElementById('updateStatus');
-  const detail = document.getElementById('updateDetail');
-  if (!message || !status) return;
-  message.textContent = translate(status.key || 'لم يبدأ البحث عن تحديثات.');
-  detail.textContent = status.detail || '';
-  const dialog = document.getElementById('updateDialog');
-  dialog.dataset.status = status.type || 'info';
-  const isBusy = ['checking', 'downloading'].includes(status.type);
-  const progress = document.getElementById('updateProgress');
-  const progressBar = document.getElementById('updateProgressBar');
-  const percentage = Math.max(0, Math.min(100, Number(status.progress) || 0));
-  progress.hidden = status.type !== 'downloading';
-  progress.setAttribute('aria-valuenow', String(percentage));
-  progressBar.style.width = `${percentage}%`;
-  document.getElementById('checkUpdates').disabled = isBusy;
-  document.getElementById('checkUpdates').textContent = isBusy ? 'جارٍ التحقق...' : 'التحقق الآن';
-  document.getElementById('installUpdate').hidden = status.key !== 'اكتمل تنزيل تحديث واصل.';
-  document.getElementById('updateAccessHelp').hidden = status.key !== 'يلزم إعداد GH_TOKEN للوصول إلى مستودع GitHub الخاص.';
-}
-
-async function runUpdateCheck() {
-  document.getElementById('checkUpdates').disabled = true;
-  renderUpdateStatus({
-    key: 'يجري التحقق من وجود تحديثات...',
-    detail: '',
-    type: 'checking',
-    progress: 0
-  });
-  try {
-    await window.wasel.checkForUpdates();
-    const currentStatus = await window.wasel.getUpdateStatus();
-    renderUpdateStatus(currentStatus);
-  } catch (error) {
-    renderUpdateStatus({
-      key: 'تعذر التحقق من التحديث.',
-      detail: error.message || 'تعذر الاتصال بخدمة التحديث.',
-      type: 'error',
-      progress: 0
-    });
-  }
-}
-
-async function openUpdateDialog() {
-  showDialog('updateDialog');
-  try {
-    renderUpdateStatus(await window.wasel.getUpdateStatus());
-  } catch (error) {
-    renderUpdateStatus({
-      key: 'تعذر التحقق من التحديث.',
-      detail: error.message || 'تعذر قراءة حالة التحديث.',
-      type: 'error',
-      progress: 0
-    });
-  }
-  await runUpdateCheck();
-}
-
-function showDialog(id) {
-  contextMenu.hidden = true;
-  for (const dialog of dialogs) dialog.hidden = dialog.id !== id;
-  backdrop.hidden = false;
-  if (id === 'addDialog') {
-    document.getElementById('dialogFolder').textContent = state.settings.outputFolder;
-    document.getElementById('urlError').textContent = '';
-    document.getElementById('urlInput').focus();
-  }
-  if (id === 'optionsDialog') {
-    document.getElementById('languageSelect').value = state.settings.language || 'ara';
-    document.getElementById('themeSelect').value = state.settings.theme;
-    document.getElementById('concurrencySelect').value = String(state.settings.maxActiveDownloads);
-    document.getElementById('connectionsPerDownloadSelect').value = String(state.settings.connectionsPerDownload);
-    document.getElementById('startWithWindows').checked = Boolean(state.settings.startWithWindows);
-    document.getElementById('optionsFolder').textContent = state.settings.outputFolder;
-  }
-  if (id === 'scheduleDialog') updateScheduleNotice();
-}
-
-function closeDialog() {
-  backdrop.hidden = true;
-  for (const dialog of dialogs) dialog.hidden = true;
-}
-
-function showInfo(title, message) {
-  document.getElementById('infoTitle').textContent = title;
-  document.getElementById('infoMessage').textContent = message;
-  showDialog('infoDialog');
-}
-
-function showDeleteDialog(ids) {
-  state.deleteIds = ids;
-  const count = ids.length;
-  document.getElementById('deleteTitle').textContent = count > 1 ? 'حذف التنزيلات' : 'حذف التنزيل';
-  document.getElementById('deleteMessage').textContent = `هل تريد إزالة ${count > 1 ? `${count} تنزيلات محددة` : 'التنزيل المحدد'} من القائمة؟`;
-  document.getElementById('deleteFromDisk').checked = false;
-  showDialog('deleteDialog');
-}
-
-function currentItem(id = state.progressId) {
-  return state.downloads.find((item) => item.id === id);
-}
-
-function updateProgressDialog() {
-  const item = currentItem();
-  if (!item || document.getElementById('progressDialog').hidden) return;
-  const amount = percent(item);
-  const dialog = document.getElementById('progressDialog');
-  document.getElementById('progressTitle').textContent = `${amount}% ${item.fileName}`;
-  document.getElementById('progressUrl').textContent = item.url;
-  document.getElementById('progressUrl').title = item.url;
-  document.getElementById('progressUrl').dataset.url = item.url;
-  document.getElementById('progressStatus').textContent = item.error ? `خطأ: ${item.error}` : STATUS_LABELS[item.status] || item.status;
-  document.getElementById('progressSize').textContent = formatBytes(item.totalBytes);
-  document.getElementById('progressReceived').textContent = `${formatBytes(item.receivedBytes)} (${amount}%)`;
-  document.getElementById('progressRate').textContent = formatRate(item.speed);
-  document.getElementById('progressEta').textContent = item.status === 'downloading' ? formatEta(item) : '—';
-  const progressBar = document.getElementById('progressBar');
-  progressBar.style.width = `${amount}%`;
-  progressBar.parentElement.setAttribute('aria-valuenow', String(amount));
-  document.getElementById('progressPercent').textContent = `${amount}%`;
-  document.getElementById('detailsPath').textContent = item.savePath;
-  document.getElementById('detailsPath').title = item.savePath;
-  document.getElementById('detailsCategory').textContent = CATEGORY_LABELS[item.category] || CATEGORY_LABELS.other;
-  document.getElementById('detailsResume').textContent = item.receivedBytes > 0 ? 'نعم، عند دعم الخادم' : 'غير معروف بعد';
-  document.getElementById('connectionLog').textContent = [
-    `الرابط: ${item.url}`,
-    `الحالة: ${STATUS_LABELS[item.status] || item.status}`,
-    item.error ? `الخطأ: ${item.error}` : `البيانات: ${formatBytes(item.receivedBytes)}`
-  ].join('\n');
-  const pauseButton = document.getElementById('progressPause');
-  pauseButton.textContent = ['downloading', 'queued'].includes(item.status) ? 'إيقاف مؤقت' : 'استئناف';
-  pauseButton.disabled = item.status === 'completed';
-  dialog.dataset.status = item.status;
-}
-
-function openProgress(id) {
-  state.progressId = id;
-  document.getElementById('progressStatusView').hidden = false;
-  document.getElementById('progressDetailsView').hidden = true;
-  document.querySelectorAll('.progress-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.progressTab === 'status'));
-  showDialog('progressDialog');
-  updateProgressDialog();
-}
-
-async function addUrls(rawText, { startImmediately = true, fileName = '' } = {}) {
-  const urls = rawText.split(/\r?\n/).map((url) => url.trim()).filter(Boolean);
-  if (urls.length === 0) throw new Error('أدخل رابط تنزيل واحدًا على الأقل.');
-  const normalized = urls.map((url) => /^www\./i.test(url) ? `https://${url}` : url);
-  const badUrl = normalized.find((url) => {
-    try { return !['http:', 'https:'].includes(new URL(url).protocol); } catch { return true; }
-  });
-  if (badUrl) throw new Error(`الرابط غير صالح أو البروتوكول غير مدعوم: ${badUrl}`);
-  const added = [];
-  for (let index = 0; index < normalized.length; index += 1) {
-    added.push(await window.wasel.add({
-      url: normalized[index],
-      fileName: normalized.length === 1 ? fileName : '',
-      startImmediately
-    }));
-  }
-  return added;
-}
-
-async function safeCall(action, successMessage) {
+async function call(action, success) {
   try {
     const result = await action();
-    if (successMessage && result !== false) showToast(successMessage);
+    if (success) toast(typeof success === 'function' ? success(result) : success, { type: 'success' });
     return result;
   } catch (error) {
-    showToast(error.message || 'تعذر تنفيذ العملية.', 'error');
-    return false;
+    toast(errorText(error), { type: 'error' });
+    return undefined;
   }
 }
 
-async function resumeSelected() {
-  const items = selectedItems().filter((item) => ['paused', 'error', 'cancelled'].includes(item.status));
+async function primaryAction(item) {
+  if (ACTIVE.has(item.status)) await call(() => api.pause(item.id));
+  else if (item.status === 'completed') await call(() => api.showFile(item.id));
+  else await call(() => api.resume(item.id));
+}
+
+async function removeItems(items, { askFiles = true } = {}) {
   if (!items.length) return;
-  await safeCall(() => Promise.all(items.map((item) => window.wasel.resume(item.id))), 'تم استئناف التنزيلات المحددة.');
+  const anyCompleted = items.some((item) => item.status === 'completed');
+  const result = await confirmDialog({
+    title: items.length > 1 ? t('remove.titleMany', { count: items.length }) : t('remove.title', { name: items[0].fileName }),
+    message: t('remove.message'),
+    confirm: t('action.remove'),
+    destructive: true,
+    checkbox: askFiles && anyCompleted ? t('remove.alsoFiles') : null
+  });
+  if (!result.confirmed) return;
+  for (const item of items) await call(() => api.remove(item.id, result.checked));
+  for (const item of items) state.selected.delete(item.id);
+  render();
 }
 
-async function pauseSelected() {
-  const items = selectedItems().filter((item) => ['downloading', 'queued'].includes(item.status));
-  if (!items.length) return;
-  await safeCall(() => Promise.all(items.map((item) => window.wasel.pause(item.id))), 'تم إيقاف التنزيلات المحددة مؤقتًا.');
-}
-
-async function deleteSelected(deleteFile = false) {
-  const ids = state.deleteIds || [];
-  for (const id of ids) {
-    const item = state.downloads.find((entry) => entry.id === id);
-    if (!item) continue;
-    if (item.status === 'downloading' || item.status === 'queued') await window.wasel.pause(id);
-    if (deleteFile) await window.wasel.removeWithFile(id);
-    else await window.wasel.remove(id);
-  }
-  state.selected.clear();
-  state.deleteIds = [];
-  closeDialog();
-  showToast('تم حذف العناصر المحددة.');
-}
-
-function scheduleStart() {
-  clearTimeout(state.scheduleTimer);
-  const input = document.getElementById('scheduleTime').value;
-  if (!input) {
-    showToast('اختر وقت البدء أولًا.', 'error');
-    return;
-  }
-  const [hours, minutes] = input.split(':').map(Number);
-  const target = new Date();
-  target.setHours(hours, minutes, 0, 0);
-  if (target <= new Date()) target.setDate(target.getDate() + 1);
-  state.scheduleTarget = target;
-  state.scheduleTimer = setTimeout(async () => {
-    state.scheduleTarget = null;
-    await safeCall(() => window.wasel.resumeAll(), 'بدأت التنزيلات المجدولة.');
-    updateScheduleNotice();
-  }, target.getTime() - Date.now());
-  updateScheduleNotice();
-  closeDialog();
-  showToast(`تمت جدولة التنزيلات في ${target.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`);
-}
-
-function updateScheduleNotice() {
-  const notice = document.getElementById('scheduleNotice');
-  if (!state.scheduleTarget) {
-    notice.textContent = 'لا توجد جدولة نشطة. تعمل الجدولة ما دام التطبيق مفتوحًا.';
-    return;
-  }
-  notice.textContent = `موعد البدء: ${state.scheduleTarget.toLocaleString()}`;
-}
-
-async function handleCommand(command, id = null) {
-  const targetId = id || state.contextId;
-  const item = state.downloads.find((entry) => entry.id === targetId);
+async function runCommand(command) {
+  const items = selectedItems();
   switch (command) {
-    case 'add':
-      document.getElementById('downloadForm').reset();
-      document.getElementById('startImmediately').checked = true;
-      showDialog('addDialog');
+    case 'add': openAddSheet(); break;
+    case 'paste': await pasteFromClipboard(); break;
+    case 'settings': openSettings(); break;
+    case 'resume-all': await call(() => api.resumeAll()); break;
+    case 'pause-all': await call(() => api.pauseAll()); break;
+    case 'resume-selected': for (const item of items) if (['paused', 'error', 'cancelled'].includes(item.status)) await call(() => api.resume(item.id)); break;
+    case 'pause-selected': for (const item of items) if (ACTIVE.has(item.status)) await call(() => api.pause(item.id)); break;
+    case 'remove-selected': await removeItems(items); break;
+    case 'clear-selection': state.selected.clear(); render(); break;
+    case 'toggle-inspector':
+      state.inspectorOpen = !state.inspectorOpen;
+      writePreference('inspectorOpen', state.inspectorOpen);
+      render();
       break;
-    case 'paste': {
-      const clipboard = await safeCall(() => window.wasel.readClipboard());
-      const url = typeof clipboard === 'string' ? clipboard.split(/\r?\n/).find((line) => /^https?:\/\/|^www\./i.test(line.trim())) : '';
-      document.getElementById('downloadForm').reset();
-      document.getElementById('urlInput').value = url || '';
-      showDialog('addDialog');
-      break;
-    }
-    case 'resume-selected': await resumeSelected(); break;
-    case 'pause-selected': await pauseSelected(); break;
-    case 'stop-all':
-      await safeCall(() => window.wasel.pauseAll(), 'توقفت التنزيلات مؤقتًا مع الاحتفاظ بالأجزاء المنزلة.');
-      break;
-    case 'delete':
-      if (state.selected.size) showDeleteDialog([...state.selected]);
-      break;
-    case 'clear-completed':
-      if (!state.downloads.some((entry) => entry.status === 'completed')) return;
-      if (confirm('إزالة جميع التنزيلات المكتملة من القائمة؟ ستبقى الملفات على القرص.')) {
-        await safeCall(() => window.wasel.clearCompleted(), 'تمت إزالة التنزيلات المكتملة من القائمة.');
-        state.selected.clear();
-      }
-      break;
-    case 'open':
-      if (item?.status === 'completed') await safeCall(() => window.wasel.openFile(item.id));
-      else if (item) openProgress(item.id);
-      break;
-    case 'show':
-      if (item) await safeCall(() => window.wasel.showFile(item.id));
-      break;
-    case 'copy-url':
-      if (item) await safeCall(() => window.wasel.copyText(item.url), 'تم نسخ الرابط.');
-      break;
-    case 'copy-path':
-      if (item) await safeCall(() => window.wasel.copyText(item.savePath), 'تم نسخ مسار الملف.');
-      break;
-    case 'resume':
-      if (item) await safeCall(() => window.wasel.resume(item.id), 'أُضيف التنزيل إلى قائمة الانتظار.');
-      break;
-    case 'pause':
-    case 'cancel':
-      if (item) await safeCall(() => window.wasel.pause(item.id), 'تم إيقاف التنزيل مع الاحتفاظ بالملف الجزئي.');
-      break;
-    case 'delete-file':
-      if (item) showDeleteDialog([item.id]);
-      if (item) document.getElementById('deleteFromDisk').checked = true;
-      break;
-    case 'open-folder':
-      await safeCall(() => window.wasel.openFolder());
-      break;
-    case 'options': showDialog('optionsDialog'); break;
-    case 'scheduler': showDialog('scheduleDialog'); break;
-    case 'export':
-      if (await safeCall(() => window.wasel.exportDownloads())) showToast('تم تصدير قائمة التنزيلات.');
-      break;
-    case 'import':
-      if (await safeCall(() => window.wasel.importDownloads())) showToast('تم استيراد القائمة.');
-      break;
-    case 'toggle-categories':
-      document.getElementById('categoryPanel').classList.toggle('hidden-panel');
-      break;
-    case 'toggle-status':
-      document.getElementById('statusBar').classList.toggle('hidden-status');
-      break;
-    case 'theme-light':
-      await safeCall(() => window.wasel.updateSettings({ theme: 'light' }));
-      break;
-    case 'theme-dark':
-      await safeCall(() => window.wasel.updateSettings({ theme: 'dark' }));
-      break;
-    case 'refresh': {
-      const refreshed = await safeCall(() => window.wasel.getState());
-      if (refreshed) {
-        state.downloads = refreshed.downloads;
-        state.settings = refreshed.settings;
-        render();
-      }
+    case 'toggle-sidebar': $('#app').classList.toggle('sidebar-hidden'); break;
+    case 'export': await call(() => api.exportDownloads(), (done) => (done ? t('toast.exported') : null)); break;
+    case 'import': {
+      const count = await call(() => api.importDownloads());
+      if (count) toast(t('toast.imported', { count }), { type: 'success' });
       break;
     }
-    case 'shortcuts':
-      showInfo('اختصارات لوحة المفاتيح', 'Ctrl+N: إضافة رابط\nCtrl+Shift+V: إضافة رابط من الحافظة\nCtrl+R: استئناف المحدد\nCtrl+P: إيقاف المحدد مؤقتًا\nCtrl+Shift+S: إيقاف الكل مؤقتًا\nCtrl+F: البحث\nF4: إظهار أو إخفاء التصنيفات\nF5: تحديث القائمة\nDelete: حذف المحدد\nEscape: إغلاق النافذة أو القائمة');
-      break;
-    case 'help': await safeCall(() => window.wasel.openHelp()); break;
-    case 'check-updates':
-      await openUpdateDialog();
-      break;
-    case 'extension-guide':
-      document.getElementById('extensionGuideDialog').dataset.browser = 'chrome';
-      document.querySelectorAll('[data-extension-tab]').forEach((tab) => {
-        tab.classList.toggle('active', tab.dataset.extensionTab === 'chrome');
-      });
-      document.querySelectorAll('[data-extension-panel]').forEach((panel) => {
-        panel.hidden = panel.dataset.extensionPanel !== 'chrome';
-      });
-      showDialog('extensionGuideDialog');
-      window.wasel.getExtensionPath()
-        .then((extensionPath) => {
-          document.querySelectorAll('[data-extension-path]').forEach((element) => {
-            element.textContent = `${extensionPath}${element.dataset.pathSuffix || ''}`;
-          });
-        })
-        .catch((error) => showToast(error.message || 'تعذر تحديد مجلد الإضافة.', 'error'));
-      break;
-    case 'about': {
-      const version = await window.wasel.getAppVersion();
-      showInfo(
-        translate('حول واصل'),
-        `${translate('عنوان التطبيق')}\n${translate('الإصدار')} ${version}\n${translate('برمجة')}: زروقي أحمد معاذ — Zerouki Ahmed Mouad\n${translate('مفتوح المصدر')}`
-      );
+    case 'clear-completed': {
+      if (!state.downloads.some((item) => item.status === 'completed')) return;
+      const result = await confirmDialog({ title: t('clear.title'), message: t('clear.message'), confirm: t('action.clearCompleted') });
+      if (result.confirmed) await call(() => api.clearCompleted());
       break;
     }
-    case 'license':
-      showInfo('ترخيص واصل', 'واصل تطبيق مجاني ومفتوح المصدر. لا يحتوي على مفاتيح تسجيل أو قيود ترخيص تجارية.');
-      break;
-    case 'exit':
-      await window.wasel.windowAction('quit');
-      break;
-    default:
-      break;
+    default: break;
   }
 }
 
-document.querySelectorAll('[data-command]').forEach((button) => {
-  button.addEventListener('click', () => {
-    document.querySelectorAll('.menu-entry.open').forEach((entry) => entry.classList.remove('open'));
-    handleCommand(button.dataset.command);
-  });
-});
-
-document.querySelectorAll('.menu-trigger[data-menu]').forEach((button) => {
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const parent = button.closest('.menu-entry');
-    const wasOpen = parent.classList.contains('open');
-    document.querySelectorAll('.menu-entry.open').forEach((entry) => entry.classList.remove('open'));
-    if (!wasOpen) parent.classList.add('open');
-  });
-});
-
-function updateMaximizeControl(maximized) {
-  const button = document.querySelector('[data-window-action="maximize"]');
-  if (!button) return;
-  button.querySelector('.maximize-icon').hidden = maximized;
-  button.querySelector('.restore-icon').hidden = !maximized;
-  button.setAttribute('aria-label', translate(maximized ? 'استعادة حجم النافذة' : 'تكبير النافذة'));
-  button.title = translate(maximized ? 'استعادة' : 'تكبير');
+function itemMenu(item) {
+  const entries = [];
+  const completed = item.status === 'completed';
+  if (completed) {
+    entries.push({ label: t('action.open'), icon: 'external', run: () => call(() => api.openFile(item.id)) });
+    entries.push({ label: t('action.showInFolder'), icon: 'folder-search', run: () => call(() => api.showFile(item.id)) });
+  }
+  if (ACTIVE.has(item.status)) entries.push({ label: t('action.pause'), icon: 'pause', run: () => call(() => api.pause(item.id)) });
+  if (['paused', 'error', 'cancelled'].includes(item.status)) entries.push({ label: item.status === 'error' ? t('action.retry') : t('action.resume'), icon: 'play', run: () => call(() => api.resume(item.id)) });
+  if (!completed && item.status !== 'cancelled') entries.push({ label: t('action.cancel'), icon: 'stop', run: () => call(() => api.cancel(item.id)) });
+  entries.push('-');
+  entries.push({ label: t('action.copyLink'), icon: 'link', run: () => call(() => api.copyText(item.url), t('toast.linkCopied')) });
+  if (completed) entries.push({ label: t('action.copyPath'), icon: 'copy', run: () => call(() => api.copyText(item.savePath), t('toast.pathCopied')) });
+  entries.push({ label: t('action.openSource'), icon: 'globe', run: () => call(() => api.openExternal(item.referer || item.url)) });
+  if (!ACTIVE.has(item.status)) entries.push({ label: t('action.redownload'), icon: 'retry', run: () => call(() => api.restart(item.id)) });
+  entries.push({ label: t('inspector.title'), icon: 'info', run: () => { state.inspectorOpen = true; writePreference('inspectorOpen', true); render(); } });
+  entries.push('-');
+  entries.push({ label: t('action.remove'), icon: 'trash', danger: true, run: () => removeItems([item]) });
+  return entries;
 }
 
-document.querySelectorAll('[data-window-action]').forEach((button) => {
-  button.addEventListener('click', async () => {
+function showMenu(entries, { x, y, anchor } = {}) {
+  const menu = $('#menu');
+  menu.innerHTML = '';
+  for (const entry of entries) {
+    if (entry === '-') {
+      menu.append(document.createElement('hr'));
+      continue;
+    }
+    if (entry.heading) {
+      const heading = document.createElement('div');
+      heading.className = 'menu-heading';
+      heading.textContent = entry.heading;
+      menu.append(heading);
+      continue;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'menuitem');
+    button.className = `${entry.danger ? 'danger' : ''}${entry.checked ? ' checked' : ''}`;
+    button.disabled = Boolean(entry.disabled);
+    button.innerHTML = `${entry.icon ? Icons.markup(entry.icon) : ''}<span>${escapeHtml(entry.label)}</span>${entry.shortcut ? `<kbd>${escapeHtml(entry.shortcut)}</kbd>` : ''}`;
+    button.addEventListener('click', () => {
+      hideMenu();
+      entry.run?.();
+    });
+    menu.append(button);
+  }
+  menu.hidden = false;
+  const rect = menu.getBoundingClientRect();
+  let left = x;
+  let top = y;
+  if (anchor) {
+    const box = anchor.getBoundingClientRect();
+    left = document.documentElement.dir === 'rtl' ? box.left : box.right - rect.width;
+    top = box.bottom + 4;
+  }
+  left = Math.max(8, Math.min(left, window.innerWidth - rect.width - 8));
+  top = Math.max(8, Math.min(top, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+}
+
+function hideMenu() {
+  $('#menu').hidden = true;
+}
+
+/* ---------- Toasts & dialogs ---------- */
+
+function toast(message, { type = 'info', action, duration = 3600 } = {}) {
+  if (!message) return;
+  const element = document.createElement('div');
+  element.className = `toast ${type}`;
+  const icon = type === 'error' ? 'alert' : type === 'success' ? 'check-circle' : 'info';
+  element.innerHTML = `${Icons.markup(icon)}<span></span>`;
+  element.querySelector('span').textContent = message;
+  if (action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button button-primary';
+    button.textContent = action.label;
+    button.addEventListener('click', () => {
+      action.run();
+      dismiss();
+    });
+    element.append(button);
+  }
+  const stack = $('#toasts');
+  stack.append(element);
+  while (stack.children.length > 3) stack.firstElementChild.remove();
+  const id = ++toastSeq;
+  element.dataset.id = String(id);
+  const timer = setTimeout(dismiss, action ? duration * 2 : duration);
+  function dismiss() {
+    clearTimeout(timer);
+    element.classList.add('leaving');
+    setTimeout(() => element.remove(), 260);
+  }
+}
+
+let activeSheet = null;
+let alertResolver = null;
+
+function openSheet(id) {
+  hideMenu();
+  if (activeSheet && activeSheet.id !== id) closeSheet({ immediate: true });
+  const sheet = document.getElementById(id);
+  $('#scrim').hidden = false;
+  sheet.hidden = false;
+  sheet.classList.remove('closing');
+  activeSheet = sheet;
+  return sheet;
+}
+
+function closeSheet({ immediate = false } = {}) {
+  if (!activeSheet) return;
+  const sheet = activeSheet;
+  activeSheet = null;
+  if (sheet.id === 'alertSheet' && alertResolver) {
+    alertResolver({ confirmed: false, checked: false });
+    alertResolver = null;
+  }
+  if (sheet.id === 'addSheet') state.add = null;
+  const finish = () => {
+    sheet.hidden = true;
+    sheet.classList.remove('closing');
+    if (!activeSheet) $('#scrim').hidden = true;
+  };
+  if (immediate) finish();
+  else {
+    sheet.classList.add('closing');
+    setTimeout(finish, 180);
+  }
+}
+
+function confirmDialog({ title, message, confirm, destructive = false, checkbox = null }) {
+  const sheet = openSheet('alertSheet');
+  sheet.classList.toggle('destructive', destructive);
+  $('#alertTitle').textContent = title;
+  $('#alertMessage').textContent = message || '';
+  $('#alertConfirm').textContent = confirm;
+  $('#alertCheckRow').hidden = !checkbox;
+  $('#alertCheck').checked = false;
+  $('#alertCheckLabel').textContent = checkbox || '';
+  setTimeout(() => $('#alertConfirm').focus(), 50);
+  return new Promise((resolve) => { alertResolver = resolve; });
+}
+
+/* ---------- Add sheet ---------- */
+
+// Expands numbered series such as file[01-12].jpg or photo[a-e].png.
+function expandPattern(url) {
+  const match = /\[(\d+)-(\d+)\]|\[([a-z])-([a-z])\]/i.exec(url);
+  if (!match) return [url];
+  const results = [];
+  if (match[1] !== undefined) {
+    const width = match[1].length;
+    const from = Number(match[1]);
+    const to = Number(match[2]);
+    if (Math.abs(to - from) > 2000) return [url];
+    const step = from <= to ? 1 : -1;
+    for (let value = from; step > 0 ? value <= to : value >= to; value += step) {
+      results.push(url.replace(match[0], String(value).padStart(width, '0')));
+    }
+  } else {
+    const from = match[3].charCodeAt(0);
+    const to = match[4].charCodeAt(0);
+    for (let code = Math.min(from, to); code <= Math.max(from, to); code += 1) results.push(url.replace(match[0], String.fromCharCode(code)));
+  }
+  return results.flatMap(expandPattern);
+}
+
+function parseUrls(text) {
+  const urls = [];
+  for (const raw of String(text || '').split(/[\r\n\s]+/)) {
+    const value = raw.trim().replace(/^<|>$/g, '');
+    if (!value) continue;
+    const normalized = /^www\./i.test(value) ? `https://${value}` : value;
+    for (const url of expandPattern(normalized)) {
+      try {
+        const parsed = new URL(url);
+        if (['http:', 'https:'].includes(parsed.protocol)) urls.push(parsed.href);
+        else urls.push({ invalid: url });
+      } catch {
+        urls.push({ invalid: url });
+      }
+    }
+  }
+  const seen = new Set();
+  return urls.filter((entry) => {
+    const key = typeof entry === 'string' ? entry : entry.invalid;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 2000);
+}
+
+function openAddSheet(prefill = {}) {
+  openSheet('addSheet');
+  state.add = {
+    folder: state.settings.outputFolder,
+    connections: 0,
+    cookies: prefill.cookies || [],
+    userAgent: prefill.userAgent || '',
+    source: prefill.source || 'manual',
+    fileName: prefill.fileName || '',
+    totalBytes: prefill.totalBytes || 0,
+    mime: prefill.mime || '',
+    probes: new Map(),
+    probeTimer: null
+  };
+  $('#addForm').reset();
+  $('#urlInput').value = (prefill.urls || []).join('\n');
+  $('#fileNameInput').value = prefill.fileName || '';
+  $('#refererInput').value = prefill.referer || '';
+  $('#userAgentInput').value = '';
+  $('#cookieInput').value = '';
+  $('#cookieInput').placeholder = state.add.cookies.length ? t('add.cookiesFromBrowser', { count: state.add.cookies.length }) : 'name=value; other=value';
+  $('#startImmediately').checked = true;
+  $('#addError').textContent = '';
+  $('#advancedOptions').open = false;
+  setSegmented($('#connectionsControl'), '0');
+  const subtitle = $('#addSource');
+  if (state.add.source === 'browser') {
+    subtitle.className = 'sheet-subtitle from-browser';
+    subtitle.innerHTML = `${Icons.markup('lock')}<span></span>`;
+    subtitle.querySelector('span').textContent = state.add.cookies.length ? t('add.fromBrowserSession') : t('add.fromBrowser');
+  } else {
+    subtitle.className = 'sheet-subtitle';
+    subtitle.textContent = state.add.source === 'clipboard' ? t('add.fromClipboard') : t('add.subtitle');
+  }
+  $('#addFolder').textContent = state.add.folder;
+  updateAddPreview();
+  setTimeout(() => {
+    const input = $('#urlInput');
+    if (input.value) $('#addSubmit').focus();
+    else input.focus();
+  }, 60);
+}
+
+function updateAddPreview() {
+  if (!state.add) return;
+  const entries = parseUrls($('#urlInput').value);
+  const urls = entries.filter((entry) => typeof entry === 'string');
+  const single = urls.length <= 1;
+  $('#fileNameInput').disabled = !single;
+  $('#fileNameLabel').style.opacity = single ? '' : '0.4';
+  const list = $('#probeList');
+  list.hidden = !entries.length;
+  const submitLabel = $('#addSubmit span');
+  submitLabel.textContent = urls.length > 1 ? t('add.downloadCount', { count: urls.length }) : t('action.download');
+  $('#addSubmit').disabled = !urls.length;
+
+  const visible = entries.slice(0, 60);
+  list.innerHTML = visible.map((entry) => {
+    if (typeof entry !== 'string') {
+      return `<li><div class="file-tile kind-other">${Icons.markup('alert')}</div><div><div class="probe-name" dir="ltr">${escapeHtml(entry.invalid)}</div><div class="probe-meta error">${escapeHtml(t('error.invalid-url', {}))}</div></div><span></span></li>`;
+    }
+    const probe = state.add.probes.get(entry);
+    const guessName = decodeURIComponent((entry.split('?')[0].split('/').pop() || hostOf(entry))) || entry;
+    const name = probe?.info?.fileName || (single && $('#fileNameInput').value) || guessName;
+    const category = probe?.info?.category || 'other';
+    const duplicate = state.downloads.some((item) => item.url === entry);
+    let meta = `<div class="probe-meta" dir="ltr">${escapeHtml(hostOf(entry))}</div>`;
+    let size = probe?.status === 'loading' ? '<span class="spinner"></span>' : '';
+    if (probe?.status === 'error') meta = `<div class="probe-meta error">${escapeHtml(probe.error)}</div>`;
+    if (probe?.status === 'done') {
+      const notes = [hostOf(entry), probe.info.resumable ? t('add.resumable') : t('add.notResumable')];
+      meta = `<div class="probe-meta${duplicate ? ' warn' : ''}">${escapeHtml(duplicate ? t('add.duplicate') : notes.join(' · '))}</div>`;
+      size = probe.info.totalBytes ? escapeHtml(formatBytes(probe.info.totalBytes)) : '';
+    } else if (duplicate) {
+      meta = `<div class="probe-meta warn">${escapeHtml(t('add.duplicate'))}</div>`;
+    }
+    return `<li><div class="file-tile kind-${category}">${Icons.markup(CATEGORY_ICONS[category] || 'doc')}</div><div><div class="probe-name">${escapeHtml(name)}</div>${meta}</div><span class="probe-size">${size}</span></li>`;
+  }).join('') + (entries.length > visible.length ? `<li><span></span><div class="probe-meta">${escapeHtml(t('add.more', { count: entries.length - visible.length }))}</div><span></span></li>` : '');
+
+  renderPageCandidates(urls, list);
+
+  if (single && urls.length === 1 && !$('#fileNameInput').value) {
+    const info = state.add.probes.get(urls[0])?.info;
+    $('#fileNameInput').placeholder = info?.fileName || t('add.fileNameAuto');
+  }
+  clearTimeout(state.add.probeTimer);
+  state.add.probeTimer = setTimeout(() => probeUrls(urls.slice(0, 12)), 450);
+}
+
+const CANDIDATE_CATEGORY = { stream: 'video', video: 'video', audio: 'music', image: 'images' };
+
+// When the single link is a web page, list what was found on it and let the user pick.
+// The main video or stream is picked by default.
+function renderPageCandidates(urls, list) {
+  const pageUrl = urls.length === 1 ? urls[0] : null;
+  const probe = pageUrl ? state.add.probes.get(pageUrl) : null;
+  if (!probe || probe.status !== 'done' || !probe.info.page) {
+    state.add.page = null;
+    return;
+  }
+  const candidates = probe.info.candidates || [];
+  if (state.add.page?.url !== pageUrl) {
+    const media = candidates.find((candidate) => ['stream', 'video', 'audio'].includes(candidate.kind));
+    state.add.page = { url: pageUrl, picked: new Set(media ? [media.url] : []) };
+  }
+  const picked = state.add.page.picked;
+  const heading = candidates.length
+    ? t('add.pageFound', { count: candidates.length, title: probe.info.title || hostOf(pageUrl) })
+    : t('add.pageEmpty');
+  list.innerHTML = `<li class="probe-heading">${escapeHtml(heading)}</li>` + candidates.slice(0, 80).map((candidate) => {
+    const category = CANDIDATE_CATEGORY[candidate.kind] || 'other';
+    const meta = [t(`add.kind.${candidate.kind}`), candidate.label, hostOf(candidate.url)].filter(Boolean).join(' · ');
+    return `<li class="candidate"><input type="checkbox" data-candidate="${escapeHtml(candidate.url)}"${picked.has(candidate.url) ? ' checked' : ''}>
+      <div class="file-tile kind-${category}">${Icons.markup(CATEGORY_ICONS[category] || 'doc')}</div>
+      <div><div class="probe-name" dir="auto">${escapeHtml(candidate.name)}</div><div class="probe-meta">${escapeHtml(meta)}</div></div><span></span></li>`;
+  }).join('');
+  const count = picked.size;
+  $('#addSubmit span').textContent = count > 1 ? t('add.downloadCount', { count }) : t('action.download');
+}
+
+async function probeUrls(urls) {
+  if (!state.add) return;
+  const add = state.add;
+  const referer = $('#refererInput').value.trim();
+  const cookieHeader = $('#cookieInput').value.trim();
+  await Promise.all(urls.map(async (url) => {
+    if (add.probes.has(url)) return;
+    add.probes.set(url, { status: 'loading' });
+    updateAddPreviewSoon();
     try {
-      const maximized = await window.wasel.windowAction(button.dataset.windowAction);
-      if (button.dataset.windowAction === 'maximize' && typeof maximized === 'boolean') {
-        updateMaximizeControl(maximized);
-      }
+      const info = await api.probe({ url, referer, cookies: add.cookies, cookieHeader });
+      add.probes.set(url, { status: 'done', info });
     } catch (error) {
-      showToast(error.message || 'تعذر تنفيذ إجراء النافذة.', 'error');
+      add.probes.set(url, { status: 'error', error: errorText(error) });
     }
+    if (state.add === add) updateAddPreviewSoon();
+  }));
+}
+
+let previewFrame = 0;
+function updateAddPreviewSoon() {
+  cancelAnimationFrame(previewFrame);
+  previewFrame = requestAnimationFrame(() => {
+    if (!state.add) return;
+    const timer = state.add.probeTimer;
+    updateAddPreview();
+    clearTimeout(state.add.probeTimer);
+    state.add.probeTimer = timer;
   });
-});
+}
 
-document.querySelector('.window-titlebar').addEventListener('dblclick', async (event) => {
-  if (event.target.closest('.window-controls')) return;
-  try {
-    const maximized = await window.wasel.windowAction('maximize');
-    if (typeof maximized === 'boolean') updateMaximizeControl(maximized);
-  } catch (error) {
-    showToast(error.message || 'تعذر تغيير حجم النافذة.', 'error');
-  }
-});
-
-window.wasel.onWindowMaximized(updateMaximizeControl);
-window.wasel.isWindowMaximized().then(updateMaximizeControl).catch((error) => {
-  showToast(error.message || 'تعذر تحديد حالة النافذة.', 'error');
-});
-
-document.addEventListener('click', (event) => {
-  if (!event.target.closest('.menu-entry')) {
-    document.querySelectorAll('.menu-entry.open').forEach((entry) => entry.classList.remove('open'));
-  }
-  if (!event.target.closest('.context-menu')) contextMenu.hidden = true;
-});
-
-document.querySelectorAll('[data-close-dialog]').forEach((button) => button.addEventListener('click', closeDialog));
-backdrop.addEventListener('click', (event) => {
-  if (event.target === backdrop) closeDialog();
-});
-
-document.querySelectorAll('[data-extension-tab]').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    const browser = tab.dataset.extensionTab;
-    document.getElementById('extensionGuideDialog').dataset.browser = browser;
-    document.querySelectorAll('[data-extension-tab]').forEach((entry) => {
-      entry.classList.toggle('active', entry === tab);
-    });
-    document.querySelectorAll('[data-extension-panel]').forEach((panel) => {
-      panel.hidden = panel.dataset.extensionPanel !== browser;
-    });
-  });
-});
-
-document.querySelectorAll('[data-copy-build]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    await safeCall(() => window.wasel.copyText('npm run build:ts'), 'تم نسخ أمر البناء.');
-  });
-});
-document.querySelectorAll('[data-copy-extension-path]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const extensionPath = await safeCall(() => window.wasel.getExtensionPath());
-    const filePath = button.dataset.copyExtensionPath === 'manifest'
-      ? `${extensionPath}\\manifest.json`
-      : extensionPath;
-    if (extensionPath) await safeCall(() => window.wasel.copyText(filePath), 'تم نسخ مسار الإضافة.');
-  });
-});
-
-document.getElementById('downloadForm').addEventListener('submit', async (event) => {
+async function submitAdd(event) {
   event.preventDefault();
-  const error = document.getElementById('urlError');
-  const button = event.currentTarget.querySelector('[type="submit"]');
-  button.disabled = true;
+  if (!state.add) return;
+  const add = state.add;
+  const entries = parseUrls($('#urlInput').value);
+  let urls = entries.filter((entry) => typeof entry === 'string');
+  const error = $('#addError');
   error.textContent = '';
+  // A page link with picked items downloads those items, with the page as referrer.
+  const page = add.page && urls.length === 1 && add.page.url === urls[0] && add.page.picked.size ? add.page : null;
+  if (page) urls = [...page.picked];
+  if (!urls.length) {
+    error.textContent = t('error.empty-url');
+    return;
+  }
+  const checksum = $('#checksumInput').value.trim();
+  if (checksum && !/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$|^[0-9a-f]{128}$/i.test(checksum)) {
+    error.textContent = t('error.invalid-checksum');
+    return;
+  }
+  const button = $('#addSubmit');
+  button.disabled = true;
+  let added = 0;
   try {
-    const added = await addUrls(document.getElementById('urlInput').value, {
-      startImmediately: document.getElementById('startImmediately').checked,
-      fileName: document.getElementById('fileNameInput').value
-    });
-    closeDialog();
-    setFilter('all');
-    state.selected = new Set(added.map((item) => item.id));
-    render();
-    showToast(`أُضيف ${added.length} تنزيل إلى القائمة.`);
+    for (const url of urls) {
+      await api.add({
+        url,
+        fileName: urls.length === 1 && !page ? $('#fileNameInput').value.trim() : '',
+        folder: add.folder !== state.settings.outputFolder ? add.folder : undefined,
+        startImmediately: $('#startImmediately').checked,
+        referer: $('#refererInput').value.trim() || (page ? page.url : ''),
+        cookies: add.cookies,
+        cookieHeader: $('#cookieInput').value.trim(),
+        userAgent: $('#userAgentInput').value.trim() || add.userAgent,
+        connections: add.connections || undefined,
+        checksum: checksum ? { expected: checksum } : undefined,
+        totalBytes: urls.length === 1 ? add.totalBytes : 0,
+        mime: urls.length === 1 ? add.mime : '',
+        source: add.source === 'browser' ? 'browser' : urls.length > 1 ? 'batch' : add.source === 'clipboard' ? 'clipboard' : 'manual'
+      });
+      added += 1;
+    }
+    closeSheet();
+    if (!state.category && !['all', 'active', 'queued'].includes(state.filter)) {
+      state.filter = 'all';
+    }
+    toast(t('toast.added', { count: added }), { type: 'success' });
   } catch (reason) {
-    error.textContent = reason.message || 'تعذر إضافة الرابط.';
+    error.textContent = errorText(reason);
   } finally {
     button.disabled = false;
   }
-});
-
-document.getElementById('downloadLater').addEventListener('click', async () => {
-  document.getElementById('startImmediately').checked = false;
-  document.getElementById('downloadForm').requestSubmit();
-});
-async function chooseDownloadFolder() {
-  const settings = await safeCall(() => window.wasel.chooseFolder());
-  if (!settings) return;
-  document.getElementById('dialogFolder').textContent = settings.outputFolder;
-  document.getElementById('optionsFolder').textContent = settings.outputFolder;
 }
 
-document.getElementById('browseFolder').addEventListener('click', chooseDownloadFolder);
-document.getElementById('optionsBrowse').addEventListener('click', chooseDownloadFolder);
-document.getElementById('saveOptions').addEventListener('click', async () => {
-  const language = document.getElementById('languageSelect').value;
-  if (!language) {
-    showToast('تعذر تحميل قائمة اللغات. أعد تشغيل واصل أو تحقق من ملفات lang.', 'error');
-    return;
+async function pasteFromClipboard() {
+  const text = await call(() => api.readClipboard());
+  const urls = parseUrls(text || '').filter((entry) => typeof entry === 'string');
+  openAddSheet({ urls, source: urls.length ? 'clipboard' : 'manual' });
+}
+
+/* ---------- Settings ---------- */
+
+function setSegmented(control, value) {
+  for (const button of $$('button', control)) button.classList.toggle('active', button.dataset.value === String(value));
+}
+
+function openSettings(pane = 'general') {
+  openSheet('settingsSheet');
+  showPane(pane);
+  renderSettings();
+}
+
+function showPane(pane) {
+  for (const tab of $$('.settings-tab')) tab.classList.toggle('active', tab.dataset.pane === pane);
+  for (const section of $$('.pane')) section.hidden = section.dataset.pane !== pane;
+  if (pane === 'updates' && ['idle', 'none', 'error'].includes(state.update.status) && !state.update.checkedAt) api.checkForUpdates().catch(() => {});
+}
+
+function renderSettings() {
+  const settings = state.settings;
+  $('#languageSelect').value = settings.language;
+  for (const button of $$('[data-theme-option]')) button.classList.toggle('active', button.dataset.themeOption === settings.theme);
+  for (const button of $$('[data-accent-option]')) button.classList.toggle('active', button.dataset.accentOption === settings.accent);
+  for (const input of $$('[data-setting]')) {
+    const value = settings[input.dataset.setting];
+    if (input.type === 'checkbox') input.checked = Boolean(value);
+    else input.value = String(value ?? '');
   }
-  const previousLanguage = state.settings.language || 'ara';
-  const result = await safeCall(() => window.wasel.updateSettings({
-    theme: document.getElementById('themeSelect').value,
-    language,
-    maxActiveDownloads: Number(document.getElementById('concurrencySelect').value),
-    connectionsPerDownload: Number(document.getElementById('connectionsPerDownloadSelect').value),
-    startWithWindows: document.getElementById('startWithWindows').checked
-  }), 'تم حفظ الإعدادات.');
-  if (result !== false) {
-    try {
-      const selectedLanguage = language;
-      if (selectedLanguage !== previousLanguage) await loadLocale(selectedLanguage);
-      closeDialog();
-    } catch (error) {
-      showToast(error.message || 'تعذر تحميل ملف اللغة.', 'error');
+  for (const control of $$('[data-setting-segmented]')) setSegmented(control, settings[control.dataset.settingSegmented]);
+  $('#settingsFolder').textContent = settings.outputFolder;
+
+  const limit = settings.speedLimit || 0;
+  $('#speedLimitToggle').checked = limit > 0;
+  $('#speedLimitRow').hidden = limit === 0;
+  const remembered = limit || readPreference('lastSpeedLimit', 1024 * 1024);
+  const unit = remembered >= 1024 * 1024 && remembered % (1024 * 1024) === 0 ? 1024 * 1024 : 1024;
+  $('#speedLimitUnit').value = String(unit);
+  $('#speedLimitValue').value = String(Math.round(remembered / unit));
+
+  setSegmented($('#proxyMode'), settings.proxy?.mode || 'system');
+  $('#proxyRow').hidden = settings.proxy?.mode !== 'manual';
+  if (document.activeElement !== $('#proxyUrl')) $('#proxyUrl').value = settings.proxy?.url || '';
+
+  const preset = Object.entries(USER_AGENTS).find(([, value]) => value === settings.userAgent)?.[0];
+  $('#userAgentPreset').value = !settings.userAgent ? '' : preset || 'custom';
+  $('#userAgentRow').hidden = $('#userAgentPreset').value !== 'custom';
+  if (document.activeElement !== $('#userAgentCustom')) $('#userAgentCustom').value = preset ? '' : settings.userAgent || '';
+
+  const schedule = settings.schedule || { enabled: false, start: '02:00', stop: '', days: [] };
+  $('#scheduleEnabled').checked = schedule.enabled;
+  if (document.activeElement !== $('#scheduleStart')) $('#scheduleStart').value = schedule.start;
+  if (document.activeElement !== $('#scheduleStop')) $('#scheduleStop').value = schedule.stop;
+  for (const button of $$('#dayPicker button')) button.classList.toggle('active', schedule.days.includes(Number(button.dataset.day)));
+  $('#scheduleNext').textContent = schedule.enabled ? nextScheduleText(schedule) : t('schedule.off');
+
+  const port = state.info.bridgePort;
+  $('#bridgeStatus').classList.toggle('ok', Boolean(port));
+  $('#bridgeText').textContent = port ? t('bridge.listening', { port }) : t('bridge.unavailable');
+  renderExtensionPath();
+  $('#aboutVersion').textContent = `${t('about.version', { version: state.info.version || '' })}`;
+  renderUpdate();
+}
+
+function nextScheduleText(schedule) {
+  const [hours, minutes] = schedule.start.split(':').map(Number);
+  const now = new Date();
+  for (let offset = 0; offset <= 7; offset += 1) {
+    const candidate = new Date(now);
+    candidate.setDate(now.getDate() + offset);
+    candidate.setHours(hours, minutes, 0, 0);
+    if (candidate > now && schedule.days.includes(candidate.getDay())) {
+      return t('schedule.next', { when: formatDate(candidate.toISOString()) });
     }
   }
-});
+  return t('schedule.noDays');
+}
 
-document.getElementById('checkUpdates').addEventListener('click', runUpdateCheck);
-document.getElementById('installUpdate').addEventListener('click', async () => {
-  try {
-    await window.wasel.installUpdate();
-  } catch (error) {
-    showToast(error.message || 'تعذر تثبيت التحديث.', 'error');
-  }
-});
+function buildDayPicker() {
+  const picker = $('#dayPicker');
+  const order = state.locale.direction === 'rtl' ? [6, 0, 1, 2, 3, 4, 5] : [1, 2, 3, 4, 5, 6, 0];
+  const format = new Intl.DateTimeFormat(state.locale.locale, { weekday: 'short' });
+  const base = new Date(2024, 0, 7);
+  picker.innerHTML = order.map((day) => {
+    const date = new Date(base);
+    date.setDate(base.getDate() + day);
+    return `<button type="button" data-day="${day}">${escapeHtml(format.format(date))}</button>`;
+  }).join('');
+}
 
-document.getElementById('saveSchedule').addEventListener('click', scheduleStart);
-document.getElementById('cancelSchedule').addEventListener('click', () => {
-  clearTimeout(state.scheduleTimer);
-  state.scheduleTimer = null;
-  state.scheduleTarget = null;
-  updateScheduleNotice();
-  showToast('تم إلغاء الجدولة.');
-});
+function renderExtensionPath() {
+  const browser = $('#browserTabs .active')?.dataset.value || 'chromium';
+  $('#stepsChromium').hidden = browser !== 'chromium';
+  $('#stepsFirefox').hidden = browser !== 'firefox';
+  $('#extensionPath').textContent = state.info.extensionPaths?.[browser] || '';
+}
 
-document.getElementById('confirmDelete').addEventListener('click', () => deleteSelected(document.getElementById('deleteFromDisk').checked)
-  .catch((error) => showToast(error.message || 'تعذر حذف العناصر.', 'error')));
-
-document.querySelectorAll('.tree-item').forEach((button) => {
-  button.addEventListener('click', () => {
-    if (button.dataset.category) setFilter('all', button.dataset.category);
-    else setFilter(button.dataset.filter);
-  });
-});
-document.getElementById('hideCategories').addEventListener('click', () => document.getElementById('categoryPanel').classList.add('hidden-panel'));
-
-document.getElementById('searchInput').addEventListener('input', (event) => {
-  state.query = event.target.value.trim();
-  render();
-});
-document.getElementById('selectAll').addEventListener('change', (event) => {
-  for (const item of filterItems()) {
-    if (event.target.checked) state.selected.add(item.id);
-    else state.selected.delete(item.id);
-  }
-  updateSelectionUI();
-});
-
-rowsElement.addEventListener('change', (event) => {
-  const checkbox = event.target.closest('[data-select-row]');
-  if (!checkbox) return;
-  setSelection(checkbox.dataset.selectRow, checkbox.checked);
-});
-
-rowsElement.addEventListener('click', (event) => {
-  const row = event.target.closest('tr[data-id]');
-  if (!row || event.target.closest('input')) return;
-  const visibleItems = filterItems();
-  if (event.ctrlKey || event.metaKey) {
-    setSelection(row.dataset.id, !state.selected.has(row.dataset.id));
-  } else if (event.shiftKey && state.lastSelectedId) {
-    const start = visibleItems.findIndex((item) => item.id === state.lastSelectedId);
-    const end = visibleItems.findIndex((item) => item.id === row.dataset.id);
-    if (start >= 0 && end >= 0) {
-      state.selected.clear();
-      for (const item of visibleItems.slice(Math.min(start, end), Math.max(start, end) + 1)) state.selected.add(item.id);
-      updateSelectionUI();
-    }
-    state.lastSelectedId = row.dataset.id;
+async function saveSettings(changes) {
+  const settings = await call(() => api.updateSettings(changes));
+  if (settings) {
+    const languageChanged = settings.language !== state.settings.language;
+    state.settings = settings;
+    applyAppearance();
+    if (languageChanged) await loadLocale(settings.language);
+    renderSettings();
+    render();
   } else {
-    state.selected.clear();
-    state.selected.add(row.dataset.id);
-    state.lastSelectedId = row.dataset.id;
-    updateSelectionUI();
+    renderSettings();
   }
-});
+}
 
-rowsElement.addEventListener('dblclick', (event) => {
-  const row = event.target.closest('tr[data-id]');
-  if (row) handleCommand('open', row.dataset.id);
-});
+function applyAppearance() {
+  document.documentElement.dataset.theme = state.settings.theme || 'system';
+  document.documentElement.dataset.accent = state.settings.accent || 'blue';
+}
 
-rowsElement.addEventListener('contextmenu', (event) => {
-  const row = event.target.closest('tr[data-id]');
-  if (!row) return;
-  event.preventDefault();
-  state.contextId = row.dataset.id;
-  if (!state.selected.has(state.contextId)) {
-    state.selected.clear();
-    state.selected.add(state.contextId);
-    render();
+function speedLimitFromInputs() {
+  const value = Math.max(1, Math.round(Number($('#speedLimitValue').value) || 1));
+  return value * Number($('#speedLimitUnit').value);
+}
+
+/* ---------- Updates ---------- */
+
+function renderUpdate() {
+  const update = state.update;
+  const title = $('#updateTitle');
+  const detail = $('#updateDetail');
+  detail.className = '';
+  $('#updateProgress').hidden = true;
+  $('#downloadUpdate').hidden = true;
+  $('#installUpdate').hidden = true;
+  $('#checkUpdates').hidden = false;
+  $('#checkUpdates').disabled = false;
+  switch (update.status) {
+    case 'checking':
+      title.textContent = t('updates.checking');
+      detail.textContent = t('updates.current', { version: state.info.version });
+      $('#checkUpdates').disabled = true;
+      break;
+    case 'available':
+      title.textContent = t('updates.available', { version: update.version });
+      detail.textContent = t('updates.current', { version: state.info.version });
+      $('#downloadUpdate').hidden = false;
+      break;
+    case 'downloading':
+      title.textContent = t('updates.downloading', { version: update.version || '' });
+      detail.textContent = `${update.progress || 0}%`;
+      $('#updateProgress').hidden = false;
+      $('#updateBar').style.width = `${update.progress || 0}%`;
+      $('#checkUpdates').disabled = true;
+      break;
+    case 'ready':
+      title.textContent = t('updates.ready', { version: update.version });
+      detail.textContent = t('updates.readyHint');
+      $('#installUpdate').hidden = false;
+      $('#checkUpdates').hidden = true;
+      break;
+    case 'none':
+      title.textContent = t('updates.upToDate');
+      detail.textContent = t('updates.current', { version: state.info.version });
+      break;
+    case 'error':
+      title.textContent = t('updates.failed');
+      detail.textContent = t(`updates.error.${update.error || 'unknown'}`);
+      detail.className = 'error';
+      break;
+    case 'unsupported':
+      title.textContent = t('updates.dev');
+      detail.textContent = t('updates.current', { version: state.info.version });
+      $('#checkUpdates').disabled = true;
+      break;
+    default:
+      title.textContent = t('updates.current', { version: state.info.version });
+      detail.textContent = t('updates.idle');
   }
-  contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 220)}px`;
-  contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 260)}px`;
-  contextMenu.hidden = false;
-});
+  const notes = $('#releaseNotes');
+  notes.hidden = !update.notes || !['available', 'downloading', 'ready'].includes(update.status);
+  notes.textContent = update.notes || '';
+  $('#updateBadge').hidden = !['available', 'ready'].includes(update.status);
+}
 
-contextMenu.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-context]');
-  if (!button) return;
-  contextMenu.hidden = true;
-  const actions = {
-    open: 'open', show: 'show', resume: 'resume', pause: 'pause', cancel: 'cancel',
-    'copy-url': 'copy-url', 'copy-path': 'copy-path', delete: 'delete', 'delete-file': 'delete-file'
-  };
-  handleCommand(actions[button.dataset.context], state.contextId);
-});
+/* ---------- Events ---------- */
 
-document.querySelectorAll('.download-table th[data-sort]').forEach((header) => {
-  header.addEventListener('click', () => {
-    if (state.sort === header.dataset.sort) state.sortDirection *= -1;
-    else {
-      state.sort = header.dataset.sort;
-      state.sortDirection = 1;
+function bindEvents() {
+  for (const button of $$('[data-command]')) {
+    button.addEventListener('click', () => runCommand(button.dataset.command));
+  }
+  for (const item of $$('.nav-item')) {
+    item.addEventListener('click', () => {
+      state.filter = item.dataset.filter || 'all';
+      state.category = item.dataset.category || null;
+      state.selected.clear();
+      $('#list').scrollTop = 0;
+      render();
+    });
+  }
+
+  const list = $('#list');
+  list.addEventListener('click', (event) => {
+    const row = event.target.closest('.row-item');
+    if (!row) {
+      if (event.target === list) {
+        state.selected.clear();
+        render();
+      }
+      return;
     }
-    document.querySelectorAll('.sort-indicator').forEach((indicator) => { indicator.textContent = '↕'; });
-    header.querySelector('.sort-indicator').textContent = state.sortDirection === 1 ? '↑' : '↓';
-    render();
-  });
-});
-document.getElementById('tableWrap').addEventListener('scroll', renderTableRows, { passive: true });
-window.addEventListener('resize', renderTableRows);
-
-document.querySelectorAll('.progress-tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    const showDetails = tab.dataset.progressTab === 'details';
-    document.getElementById('progressStatusView').hidden = showDetails;
-    document.getElementById('progressDetailsView').hidden = !showDetails;
-    document.querySelectorAll('.progress-tab').forEach((entry) => entry.classList.toggle('active', entry === tab));
-  });
-});
-document.getElementById('progressUrl').addEventListener('click', async (event) => {
-  event.preventDefault();
-  await safeCall(() => window.wasel.openExternal(event.currentTarget.dataset.url));
-});
-document.getElementById('progressUrl').addEventListener('contextmenu', async (event) => {
-  event.preventDefault();
-  await safeCall(() => window.wasel.copyText(event.currentTarget.dataset.url), 'تم نسخ رابط التنزيل.');
-});
-document.querySelectorAll('[data-progress-action]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const item = currentItem();
+    const item = state.downloads.find((entry) => entry.id === row.dataset.id);
     if (!item) return;
-    if (button.dataset.progressAction === 'pause') {
-      if (['downloading', 'queued'].includes(item.status)) await safeCall(() => window.wasel.pause(item.id), 'تم إيقاف التنزيل مؤقتًا.');
-      else await safeCall(() => window.wasel.resume(item.id), 'أُضيف التنزيل إلى قائمة الانتظار.');
-    } else {
-      await safeCall(() => window.wasel.pause(item.id), 'تم إيقاف التنزيل مع الاحتفاظ بالجزء.');
-      closeDialog();
+    const action = event.target.closest('[data-row-action]')?.dataset.rowAction;
+    if (action === 'primary') {
+      primaryAction(item);
+      return;
+    }
+    if (action === 'menu') {
+      if (!state.selected.has(item.id)) selectOnly(item.id);
+      render();
+      showMenu(itemMenu(item), { anchor: event.target.closest('button') });
+      return;
+    }
+    handleRowClick(event, item.id);
+  });
+  list.addEventListener('dblclick', (event) => {
+    const row = event.target.closest('.row-item');
+    if (!row || event.target.closest('button')) return;
+    const item = state.downloads.find((entry) => entry.id === row.dataset.id);
+    if (!item) return;
+    if (item.status === 'completed') call(() => api.openFile(item.id));
+    else {
+      state.inspectorOpen = true;
+      writePreference('inspectorOpen', true);
+      render();
     }
   });
-});
+  list.addEventListener('contextmenu', (event) => {
+    const row = event.target.closest('.row-item');
+    if (!row) return;
+    event.preventDefault();
+    const item = state.downloads.find((entry) => entry.id === row.dataset.id);
+    if (!item) return;
+    if (!state.selected.has(item.id)) selectOnly(item.id);
+    render();
+    if (state.selected.size > 1) {
+      showMenu([
+        { heading: t('count.selected', { count: state.selected.size }) },
+        { label: t('action.resume'), icon: 'play', run: () => runCommand('resume-selected') },
+        { label: t('action.pause'), icon: 'pause', run: () => runCommand('pause-selected') },
+        { label: t('action.copyLinks'), icon: 'link', run: () => call(() => api.copyText(selectedItems().map((entry) => entry.url).join('\n')), t('toast.linkCopied')) },
+        '-',
+        { label: t('action.remove'), icon: 'trash', danger: true, run: () => runCommand('remove-selected') }
+      ], { x: event.clientX, y: event.clientY });
+    } else {
+      showMenu(itemMenu(item), { x: event.clientX, y: event.clientY });
+    }
+  });
 
-document.addEventListener('keydown', (event) => {
-  const key = event.key.toLowerCase();
-  if (event.key === 'Escape') {
-    if (!contextMenu.hidden) contextMenu.hidden = true;
-    else if (!backdrop.hidden) closeDialog();
-    else document.querySelectorAll('.menu-entry.open').forEach((entry) => entry.classList.remove('open'));
-    return;
-  }
-  if ((event.ctrlKey || event.metaKey) && key === 'n') {
-    event.preventDefault();
-    handleCommand('add');
-  } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'v') {
-    event.preventDefault();
-    handleCommand('paste');
-  } else if ((event.ctrlKey || event.metaKey) && key === 'f') {
-    event.preventDefault();
-    document.getElementById('searchInput').focus();
-  } else if ((event.ctrlKey || event.metaKey) && key === 'r') {
-    event.preventDefault();
-    resumeSelected();
-  } else if ((event.ctrlKey || event.metaKey) && key === 'p') {
-    event.preventDefault();
-    pauseSelected();
-  } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 's') {
-    event.preventDefault();
-    handleCommand('stop-all');
-  } else if (key === 'delete' && state.selected.size && backdrop.hidden) {
-    showDeleteDialog([...state.selected]);
-  } else if (key === 'f4') {
-    document.getElementById('categoryPanel').classList.toggle('hidden-panel');
-  } else if (key === 'f5') {
-    window.wasel.getState().then(setState).catch((error) => showToast(error.message, 'error'));
-  }
-});
+  $('#sortButton').addEventListener('click', (event) => {
+    const option = (key, label) => ({
+      label, checked: state.sort.key === key, run: () => {
+        state.sort = { key, dir: state.sort.key === key ? state.sort.dir : (key === 'fileName' ? 1 : -1) };
+        writePreference('sort', state.sort);
+        render();
+      }
+    });
+    showMenu([
+      { heading: t('sort.title') },
+      option('createdAt', t('sort.date')),
+      option('fileName', t('sort.name')),
+      option('totalBytes', t('sort.size')),
+      option('progress', t('sort.progress')),
+      option('status', t('sort.status')),
+      '-',
+      { label: t('sort.ascending'), checked: state.sort.dir === 1, run: () => { state.sort.dir = 1; writePreference('sort', state.sort); render(); } },
+      { label: t('sort.descending'), checked: state.sort.dir === -1, run: () => { state.sort.dir = -1; writePreference('sort', state.sort); render(); } }
+    ], { anchor: event.currentTarget });
+  });
 
-document.addEventListener('dragover', (event) => event.preventDefault());
-document.addEventListener('drop', async (event) => {
-  event.preventDefault();
-  const values = [...new Set([
-    event.dataTransfer.getData('text/uri-list'),
-    event.dataTransfer.getData('text/plain')
-  ].filter(Boolean).join('\n').split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^(https?:\/\/|www\.)/i.test(line)))];
-  if (values.length) {
-    const added = await safeCall(() => addUrls(values.join('\n'), { startImmediately: true }));
-    if (added) showToast(`${translate('تمت إضافة الروابط المسحوبة')} (${added.length}) ${translate('وبدأت التنزيلات فورًا')}.`);
-  }
-});
+  $('#searchInput').addEventListener('input', (event) => {
+    state.query = event.target.value.trim();
+    render();
+  });
 
-let renderTimer;
-window.wasel.onChange((nextState) => {
-  setState(nextState);
+  $('#inspectorBody').addEventListener('click', (event) => {
+    const item = inspectorItem();
+    if (!item) return;
+    const link = event.target.closest('[data-inspector-link]')?.dataset.inspectorLink;
+    if (link === 'show') call(() => api.showFile(item.id));
+    if (link === 'copy') call(() => api.copyText(item.url), t('toast.linkCopied'));
+    const action = event.target.closest('[data-inspector]')?.dataset.inspector;
+    if (!action) return;
+    if (action === 'open') call(() => api.openFile(item.id));
+    if (action === 'show') call(() => api.showFile(item.id));
+    if (action === 'copy-url') call(() => api.copyText(item.url), t('toast.linkCopied'));
+    if (action === 'restart') call(() => api.restart(item.id));
+    if (action === 'remove') removeItems([item]);
+    if (action === 'hash') {
+      toast(t('toast.hashing'));
+      call(() => api.hash(item.id, 'sha256')).then((hash) => {
+        if (!hash) return;
+        item.hash = hash;
+        renderInspector();
+        call(() => api.copyText(hash), t('toast.hashCopied'));
+      });
+    }
+  });
+
+  for (const button of $$('[data-window-action]')) {
+    button.addEventListener('click', () => api.windowAction(button.dataset.windowAction));
+  }
+  $('.toolbar').addEventListener('dblclick', (event) => {
+    if (!event.target.closest('button, input, label')) api.windowAction('maximize');
+  });
+  $('.sidebar-top').addEventListener('dblclick', (event) => {
+    if (!event.target.closest('button')) api.windowAction('maximize');
+  });
+
+  $('#scrim').addEventListener('click', () => {
+    if (activeSheet?.id !== 'alertSheet') closeSheet();
+  });
+  for (const button of $$('[data-close-sheet]')) button.addEventListener('click', () => closeSheet());
+  $('#alertConfirm').addEventListener('click', () => {
+    const resolve = alertResolver;
+    alertResolver = null;
+    closeSheet();
+    resolve?.({ confirmed: true, checked: $('#alertCheck').checked });
+  });
+
+  $('#addForm').addEventListener('submit', submitAdd);
+  $('#urlInput').addEventListener('input', updateAddPreview);
+  $('#probeList').addEventListener('change', (event) => {
+    const box = event.target.closest('[data-candidate]');
+    if (!box || !state.add?.page) return;
+    if (box.checked) state.add.page.picked.add(box.dataset.candidate);
+    else state.add.page.picked.delete(box.dataset.candidate);
+    updateAddPreviewSoon();
+  });
+  $('#fileNameInput').addEventListener('input', updateAddPreviewSoon);
+  $('#urlInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) $('#addForm').requestSubmit();
+  });
+  $('#connectionsControl').addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button || !state.add) return;
+    state.add.connections = Number(button.dataset.value);
+    setSegmented($('#connectionsControl'), button.dataset.value);
+  });
+  $('#addBrowse').addEventListener('click', async () => {
+    if (!state.add) return;
+    const folder = await call(() => api.chooseFolder(state.add.folder));
+    if (folder && state.add) {
+      state.add.folder = folder;
+      $('#addFolder').textContent = folder;
+    }
+  });
+
+  // Settings
+  for (const tab of $$('.settings-tab')) tab.addEventListener('click', () => showPane(tab.dataset.pane));
+  $('#languageSelect').addEventListener('change', (event) => saveSettings({ language: event.target.value }));
+  for (const button of $$('[data-theme-option]')) button.addEventListener('click', () => saveSettings({ theme: button.dataset.themeOption }));
+  for (const button of $$('[data-accent-option]')) button.addEventListener('click', () => saveSettings({ accent: button.dataset.accentOption }));
+  for (const input of $$('[data-setting]')) {
+    input.addEventListener('change', () => {
+      const key = input.dataset.setting;
+      const value = input.type === 'checkbox' ? input.checked : input.hasAttribute('data-number') ? Number(input.value) : input.value;
+      saveSettings({ [key]: value });
+    });
+  }
+  for (const control of $$('[data-setting-segmented]')) {
+    control.addEventListener('click', (event) => {
+      const button = event.target.closest('button');
+      if (button) saveSettings({ [control.dataset.settingSegmented]: Number(button.dataset.value) });
+    });
+  }
+  $('#changeOutputFolder').addEventListener('click', async () => {
+    const folder = await call(() => api.chooseFolder());
+    if (folder) {
+      const settings = await call(() => api.setOutputFolder(folder));
+      if (settings) {
+        state.settings = settings;
+        renderSettings();
+      }
+    }
+  });
+  $('#openOutputFolder').addEventListener('click', () => call(() => api.openFolder()));
+  $('#speedLimitToggle').addEventListener('change', (event) => {
+    saveSettings({ speedLimit: event.target.checked ? speedLimitFromInputs() : 0 });
+  });
+  const applySpeed = () => {
+    const limit = speedLimitFromInputs();
+    writePreference('lastSpeedLimit', limit);
+    if ($('#speedLimitToggle').checked) saveSettings({ speedLimit: limit });
+  };
+  $('#speedLimitValue').addEventListener('change', applySpeed);
+  $('#speedLimitUnit').addEventListener('change', applySpeed);
+  $('#turboChip').addEventListener('click', async () => {
+    const enable = !state.settings.turbo;
+    await saveSettings({ turbo: enable });
+    toast(enable ? t('toast.turboOn') : t('toast.turboOff'), { type: enable ? 'success' : 'info' });
+  });
+  $('#limitChip').addEventListener('click', () => {
+    const current = state.settings.speedLimit || 0;
+    if (current) writePreference('lastSpeedLimit', current);
+    saveSettings({ speedLimit: current ? 0 : readPreference('lastSpeedLimit', 1024 * 1024) });
+    toast(current ? t('toast.limitOff') : t('toast.limitOn', { speed: formatSpeed(readPreference('lastSpeedLimit', 1024 * 1024)) }));
+  });
+  $('#proxyMode').addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    const mode = button.dataset.value;
+    if (mode === 'manual' && !$('#proxyUrl').value.trim()) {
+      setSegmented($('#proxyMode'), 'manual');
+      $('#proxyRow').hidden = false;
+      $('#proxyUrl').focus();
+      return;
+    }
+    saveSettings({ proxy: { mode, url: $('#proxyUrl').value.trim() } });
+  });
+  $('#proxyUrl').addEventListener('change', () => saveSettings({ proxy: { mode: 'manual', url: $('#proxyUrl').value.trim() } }));
+  $('#userAgentPreset').addEventListener('change', (event) => {
+    const value = event.target.value;
+    if (value === 'custom') {
+      $('#userAgentRow').hidden = false;
+      $('#userAgentCustom').focus();
+      return;
+    }
+    saveSettings({ userAgent: USER_AGENTS[value] || '' });
+  });
+  $('#userAgentCustom').addEventListener('change', (event) => saveSettings({ userAgent: event.target.value.trim() }));
+  const saveSchedule = () => {
+    const days = $$('#dayPicker button.active').map((button) => Number(button.dataset.day));
+    saveSettings({ schedule: { enabled: $('#scheduleEnabled').checked, start: $('#scheduleStart').value || '02:00', stop: $('#scheduleStop').value || '', days } });
+  };
+  $('#scheduleEnabled').addEventListener('change', saveSchedule);
+  $('#scheduleStart').addEventListener('change', saveSchedule);
+  $('#scheduleStop').addEventListener('change', saveSchedule);
+  $('#dayPicker').addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    button.classList.toggle('active');
+    saveSchedule();
+  });
+  $('#browserTabs').addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    setSegmented($('#browserTabs'), button.dataset.value);
+    renderExtensionPath();
+  });
+  $('#copyExtensionPath').addEventListener('click', () => call(() => api.copyText($('#extensionPath').textContent), t('toast.pathCopied')));
+  $('#openExtensionPath').addEventListener('click', () => call(() => api.openFolder($('#extensionPath').textContent)));
+  $('#checkUpdates').addEventListener('click', () => call(() => api.checkForUpdates()));
+  $('#downloadUpdate').addEventListener('click', () => call(() => api.downloadUpdate()));
+  $('#installUpdate').addEventListener('click', () => call(() => api.installUpdate()));
+  for (const button of $$('[data-link]')) {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      const target = button.dataset.link === 'assistant' ? 'https://github.com/riadfgg'
+        : button.dataset.link === 'website' ? state.info.website
+        : button.dataset.link === 'issues' ? `${state.info.repository}/issues` : state.info.repository;
+      call(() => api.openExternal(target));
+    });
+  }
+
+  // Global keyboard handling
+  document.addEventListener('keydown', (event) => {
+    const key = event.key.toLowerCase();
+    const mod = event.ctrlKey || event.metaKey;
+    const typing = event.target.closest('input, textarea, select, [contenteditable]');
+    if (event.key === 'Escape') {
+      if (!$('#menu').hidden) hideMenu();
+      else if (activeSheet) closeSheet();
+      else if (state.query) {
+        $('#searchInput').value = '';
+        state.query = '';
+        render();
+      } else if (state.selected.size) {
+        state.selected.clear();
+        render();
+      }
+      return;
+    }
+    if (activeSheet) return;
+    if (mod && key === 'n') { event.preventDefault(); runCommand('add'); return; }
+    if (mod && key === ',') { event.preventDefault(); openSettings(); return; }
+    if (mod && key === 'f') { event.preventDefault(); $('#searchInput').focus(); return; }
+    if (mod && key === 'i') { event.preventDefault(); runCommand('toggle-inspector'); return; }
+    if (mod && event.shiftKey && key === 'p') { event.preventDefault(); runCommand('pause-all'); return; }
+    if (mod && event.shiftKey && key === 'r') { event.preventDefault(); runCommand('resume-all'); return; }
+    if (typing) return;
+    if (mod && key === 'a') {
+      event.preventDefault();
+      state.selected = new Set(visibleItems().map((item) => item.id));
+      render();
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveSelection(event.key === 'ArrowDown' ? 1 : -1, event.shiftKey);
+    } else if (event.key === ' ') {
+      event.preventDefault();
+      const items = selectedItems();
+      if (items.some((item) => ACTIVE.has(item.status))) runCommand('pause-selected');
+      else runCommand('resume-selected');
+    } else if (event.key === 'Delete' || (event.key === 'Backspace' && mod)) {
+      runCommand('remove-selected');
+    } else if (event.key === 'Enter') {
+      const item = inspectorItem();
+      if (item?.status === 'completed') call(() => api.openFile(item.id));
+    } else if (mod && key === 'c' && state.selected.size) {
+      call(() => api.copyText(selectedItems().map((item) => item.url).join('\n')), t('toast.linkCopied'));
+    }
+  });
+
+  document.addEventListener('paste', (event) => {
+    if (activeSheet || event.target.closest('input, textarea')) return;
+    const urls = parseUrls(event.clipboardData.getData('text')).filter((entry) => typeof entry === 'string');
+    if (urls.length) {
+      event.preventDefault();
+      openAddSheet({ urls, source: 'clipboard' });
+    }
+  });
+
+  document.addEventListener('mousedown', (event) => {
+    if (!$('#menu').hidden && !event.target.closest('#menu')) hideMenu();
+  });
+  window.addEventListener('blur', hideMenu);
+  window.addEventListener('resize', () => {
+    hideMenu();
+    drawSpeedGraph();
+    renderInspector();
+  });
+
+  let dragDepth = 0;
+  document.addEventListener('dragenter', (event) => {
+    if (![...event.dataTransfer.types].some((type) => type === 'text/uri-list' || type === 'text/plain')) return;
+    dragDepth += 1;
+    $('#dropOverlay').hidden = false;
+  });
+  document.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) $('#dropOverlay').hidden = true;
+  });
+  document.addEventListener('dragover', (event) => event.preventDefault());
+  document.addEventListener('drop', async (event) => {
+    event.preventDefault();
+    dragDepth = 0;
+    $('#dropOverlay').hidden = true;
+    const text = [event.dataTransfer.getData('text/uri-list'), event.dataTransfer.getData('text/plain')].filter(Boolean).join('\n');
+    const urls = parseUrls(text.split('\n').filter((line) => !line.startsWith('#')).join('\n')).filter((entry) => typeof entry === 'string');
+    if (!urls.length) return;
+    let added = 0;
+    for (const url of urls) {
+      if (await call(() => api.add({ url, startImmediately: true, source: urls.length > 1 ? 'batch' : 'manual' }))) added += 1;
+    }
+    if (added) toast(t('toast.added', { count: added }), { type: 'success' });
+  });
+}
+
+/* ---------- Live state ---------- */
+
+function applyState(next) {
+  state.downloads = next.downloads;
+  state.stats = next.stats || state.stats;
+  const settingsChanged = JSON.stringify(next.settings) !== JSON.stringify(state.settings);
+  state.settings = next.settings;
+  state.speedHistory.push(state.stats.speed || 0);
+  if (state.speedHistory.length > HISTORY) state.speedHistory.shift();
+  const live = new Set();
+  for (const item of state.downloads) {
+    if (item.status !== 'downloading') continue;
+    live.add(item.id);
+    const history = state.itemHistory.get(item.id) || [];
+    history.push(item.speed || 0);
+    if (history.length > HISTORY) history.shift();
+    state.itemHistory.set(item.id, history);
+  }
+  for (const id of state.itemHistory.keys()) {
+    if (!live.has(id) && !state.downloads.some((item) => item.id === id && item.status === 'paused')) state.itemHistory.delete(id);
+  }
+  if (settingsChanged) {
+    applyAppearance();
+    if (activeSheet?.id === 'settingsSheet') renderSettings();
+  }
+  render();
+}
+
+async function init() {
+  Icons.hydrate();
+  const saved = readPreference('sort', null);
+  if (saved?.key) state.sort = saved;
+  const [info, initial, languages, update] = await Promise.all([api.info(), api.getState(), api.listLanguages(), api.getUpdateState()]);
+  state.info = info;
+  state.update = update || state.update;
+  document.documentElement.classList.toggle('material', Boolean(info.material));
+  $('#languageSelect').innerHTML = languages.map((language) => `<option value="${language.code}">${escapeHtml(language.name)}</option>`).join('');
+  state.settings = initial.settings;
+  state.downloads = initial.downloads;
+  state.stats = initial.stats;
+  applyAppearance();
+  bindEvents();
+  await loadLocale(initial.settings.language);
+
+  api.onChange(applyState);
+  api.onIncoming((payload) => openAddSheet(payload));
+  api.onUpdateState((update) => {
+    state.update = update;
+    renderUpdate();
+    if (update.status === 'ready') {
+      toast(t('updates.ready', { version: update.version }), { action: { label: t('updates.install'), run: () => api.installUpdate() } });
+    }
+  });
+  api.onNotice((notice) => toast(t(notice.key, notice.params), { type: notice.type }));
+  api.onOpenSettings((pane) => openSettings(pane));
+  api.onWindowFocus((focused) => {
+    state.windowFocused = focused;
+    document.body.classList.toggle('window-blurred', !focused);
+  });
+  setInterval(() => {
+    if (state.downloads.some((item) => item.retry)) renderList();
+  }, 1000);
+  await api.ready();
+}
+
+init().catch((error) => {
+  console.error(error);
+  toast(errorText(error), { type: 'error', duration: 10000 });
 });
-Promise.all([window.wasel.getState(), populateLanguageOptions()])
-  .then(async ([nextState]) => {
-    setState(nextState);
-    await loadLocale(nextState.settings.language || 'ara');
-    document.getElementById('saveOptions').disabled = false;
-  })
-  .catch((error) => showToast(error.message || 'تعذر تهيئة التطبيق أو ملفات اللغات.', 'error'));

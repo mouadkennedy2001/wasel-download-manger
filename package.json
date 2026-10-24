@@ -1,54 +1,89 @@
 {
   "name": "wasel-download-manager",
-  "version": "1.2.1",
-  "description": "Cross-browser desktop download manager with automatic private GitHub releases",
+  "version": "2.0.0",
+  "description": "Wasel — a fast, Apple-style download manager for Windows with multi-connection downloads and browser integration",
   "author": "Zerouki Ahmed Mouad",
+  "contributors": [
+    "riadfgg (https://github.com/riadfgg)"
+  ],
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/mouadkennedy2001/wasel-download-manger.git"
   },
-  "homepage": "https://github.com/mouadkennedy2001/wasel-download-manger",
+  "homepage": "https://mouadkennedy2001.github.io/wasel-download-manger/",
   "main": "src/main.js",
   "scripts": {
     "build:ts": "tsc --project tsconfig.json",
     "prestart": "npm run build:ts",
     "start": "electron .",
+    "test": "npm run build:ts && node --test \"tests/*.test.js\"",
+    "check": "npm run build:ts && node scripts/check-syntax.js",
     "build:win": "npm run build:ts && electron-builder --win nsis --x64",
-    "release:win": "npm run build:ts && electron-builder --win nsis --x64 --publish always",
-    "pretest": "npm run build:ts",
-    "test": "node --test",
-    "check": "npm run build:ts && node --check src/main.js && node --check src/preload.js && node --check src/download-manager.js && node --check src/languages.js && node --check src/icons.js && node --check src/renderer.js && node --check extension/popup.js && node --check extension/background.js && node --check extension/download-capture.js"
+    "release:win": "npm run build:ts && electron-builder --win nsis --x64 --publish always"
   },
   "devDependencies": {
     "electron": "^45.0.0",
     "electron-builder": "^26.18.0",
     "typescript": "^7.0.2"
   },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
   "build": {
     "appId": "com.zerouki.wasel",
     "productName": "Wasel Download Manager",
+    "copyright": "© Zerouki Ahmed Mouad",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "!src/**/*.ts",
+      "lang/**/*",
+      "assets/**/*",
+      "extension/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "extension",
+        "to": "extension"
+      }
+    ],
+    "protocols": [
+      {
+        "name": "Wasel Download Link",
+        "schemes": ["wasel"]
+      }
+    ],
     "publish": [
       {
         "provider": "github",
         "owner": "mouadkennedy2001",
         "repo": "wasel-download-manger",
-        "private": true
+        "releaseType": "release"
       }
     ],
     "win": {
       "icon": "assets/wasel.ico",
-      "target": ["nsis"]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "perMachine": false,
-      "artifactName": "${productName}-${version}-Setup.${ext}"
+      "shortcutName": "Wasel",
+      "installerIcon": "assets/wasel.ico",
+      "uninstallerIcon": "assets/wasel.ico",
+      "artifactName": "Wasel-Setup-${version}.${ext}"
     }
-  },
-  "dependencies": {
-    "electron-updater": "^6.8.11"
   }
 }

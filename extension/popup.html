@@ -10,18 +10,20 @@
     <main class="popup">
       <header class="brand">
         <img class="brand-mark" src="icons/icon48.png" alt="">
-        <div><strong>Wasel</strong><span>Download Manager</span></div>
+        <div>
+          <strong>Wasel</strong>
+          <span class="status"><i id="bridgeDot"></i><span id="bridgeText">Checking…</span></span>
+        </div>
       </header>
-      <label for="downloadUrl">Web address</label>
+      <label for="downloadUrl">Links</label>
       <textarea id="downloadUrl" rows="3" spellcheck="false" placeholder="https://example.com/file.zip"></textarea>
-      <p id="message" role="status" aria-live="polite">The active page address is filled in automatically.</p>
+      <p id="message" role="status" aria-live="polite"></p>
       <button id="send" type="button">Send to Wasel</button>
       <label class="capture-setting" for="captureDownloads">
         <input id="captureDownloads" type="checkbox">
-        <span>Send browser downloads to Wasel automatically</span>
+        <span>Take over browser downloads</span>
       </label>
-      <p id="captureStatus" role="status" aria-live="polite"></p>
-      <footer>Wasel asks before adding captured links. You can turn capture off here.</footer>
+      <footer>Wasel asks before adding links from the browser. Your sign-in session is sent only to Wasel on this computer.</footer>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

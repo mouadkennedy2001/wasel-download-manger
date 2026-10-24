@@ -1,86 +1,134 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const http = require('node:http');
-const https = require('node:https');
-const { Transform } = require('node:stream');
-const { finished, pipeline } = require('node:stream/promises');
-const { isSupportedLanguage } = require('./languages');
+const crypto = require('node:crypto');
+const { WaselError, describeError, isTransient } = require('./engine/errors');
+const { CookieJar, HttpClient } = require('./engine/http');
+const { Throttle } = require('./engine/throttle');
+const { applySettings, restoreSettings } = require('./engine/settings');
+const { pageTitle, sniffPage } = require('./engine/sniff');
+const { bestVariant, decryptSegment, isHlsMime, isHlsUrl, isPlaylist, mediaSegments } = require('./engine/hls');
+const {
+  CATEGORY_FOLDERS, categoryFor, cleanFileName, fileNameFromUrl, isAttachment, resolveFileName, uniqueName
+} = require('./engine/filenames');
 
-const MAX_ACTIVE_DOWNLOADS = 3;
-const DEFAULT_CONNECTIONS_PER_DOWNLOAD = 4;
-const MAX_CONNECTIONS_PER_DOWNLOAD = 8;
-const RANGE_SEGMENT_SIZE = 2 * 1024 * 1024;
-const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
+const MIN_SPLIT = 512 * 1024;
+const TURBO_CONNECTIONS = 32;
+const MAX_PAGE_BYTES = 4 * 1024 * 1024;
+const HLS_CONCURRENCY = 6;
+const STEAL_SAFETY = 256 * 1024;
+const MIN_INITIAL_CHUNK = 1024 * 1024;
+const CHUNK_RETRIES = 3;
+const PERSIST_INTERVAL = 4000;
+const HASH_ALGORITHMS = ['sha256', 'sha1', 'md5', 'sha512'];
+const ACTIVE_STATES = new Set(['downloading', 'queued']);
 
 class DownloadManager {
-  constructor({ dataFile, defaultFolder, onChange = () => {} }) {
+  constructor({ dataFile, defaultFolder, onChange = () => {}, onEvent = () => {}, resolveProxy = async () => 'DIRECT' }) {
     this.dataFile = dataFile;
-    this.defaultFolder = defaultFolder;
+    this.defaultFolder = path.resolve(defaultFolder);
+    this.outputFolder = this.defaultFolder;
     this.onChange = onChange;
+    this.onEvent = onEvent;
+    this.systemProxy = resolveProxy;
+    this.proxyCache = new Map();
     this.items = [];
     this.active = new Map();
-    this.settings = {
-      theme: 'dark',
-      language: 'ara',
-      maxActiveDownloads: MAX_ACTIVE_DOWNLOADS,
-      connectionsPerDownload: DEFAULT_CONNECTIONS_PER_DOWNLOAD,
-      startWithWindows: false
-    };
+    this.settings = restoreSettings({});
+    this.throttle = new Throttle(0);
+    this.client = new HttpClient({
+      userAgent: () => this.settings.userAgent,
+      resolveProxy: (url) => this.proxyFor(url)
+    });
     this.persistChain = Promise.resolve();
+    this.lastPersist = 0;
     this.shuttingDown = false;
+    this.hadActivity = false;
     this.tick = setInterval(() => this.reportProgress(), 500);
     this.tick.unref();
   }
 
   async initialize() {
-    await ensureDirectory(this.defaultFolder);
+    let stored = null;
     try {
-      const stored = JSON.parse(await fsp.readFile(this.dataFile, 'utf8'));
-      if (Array.isArray(stored.items)) this.items = stored.items;
-      if (stored.settings && ['light', 'dark'].includes(stored.settings.theme)) {
-        this.settings.theme = stored.settings.theme;
-      }
-      if (stored.settings && isSupportedLanguage(stored.settings.language)) {
-        this.settings.language = stored.settings.language;
-      }
-      if (stored.settings && Number.isInteger(stored.settings.maxActiveDownloads)) {
-        this.settings.maxActiveDownloads = Math.min(10, Math.max(1, stored.settings.maxActiveDownloads));
-      }
-      if (stored.settings && Number.isInteger(stored.settings.connectionsPerDownload)) {
-        this.settings.connectionsPerDownload = Math.min(
-          MAX_CONNECTIONS_PER_DOWNLOAD,
-          Math.max(1, stored.settings.connectionsPerDownload)
-        );
-      }
-      if (stored.settings && typeof stored.settings.startWithWindows === 'boolean') {
-        this.settings.startWithWindows = stored.settings.startWithWindows;
-      }
-      if (stored.settings && typeof stored.settings.outputFolder === 'string') {
-        const storedFolder = path.resolve(stored.settings.outputFolder);
-        await ensureDirectory(storedFolder);
-        this.defaultFolder = storedFolder;
-      }
+      stored = JSON.parse(await fsp.readFile(this.dataFile, 'utf8'));
     } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+    this.settings = restoreSettings(stored?.settings);
+    this.applyRate();
+    if (typeof stored?.settings?.outputFolder === 'string') {
+      this.outputFolder = path.resolve(stored.settings.outputFolder);
+    }
+    try {
+      await ensureDirectory(this.outputFolder);
+    } catch {
+      this.outputFolder = this.defaultFolder;
+      await ensureDirectory(this.outputFolder);
     }
 
-    for (const item of this.items) {
-      if (item.status === 'downloading') item.status = 'paused';
-      if (item.status === 'queued') item.status = 'paused';
-      if (item.status === 'downloading' || item.status === 'paused') {
-        item.receivedBytes = await this.getPartialSize(item);
-      }
-    }
+    const items = Array.isArray(stored?.items) ? stored.items : [];
+    this.items = items.filter((item) => item && typeof item.url === 'string' && typeof item.savePath === 'string');
+    for (const item of this.items) await this.restoreItem(item);
     await this.persist();
     this.publish();
   }
 
+  // Brings rows written by older versions (and rows interrupted by a crash) into a
+  // consistent, resumable shape.
+  async restoreItem(item) {
+    item.id ||= createId();
+    item.fileName = cleanFileName(item.fileName || path.basename(item.savePath));
+    if (!item.category || item.category === 'media') item.category = categoryFor(item.fileName);
+    if (ACTIVE_STATES.has(item.status) || item.status === 'verifying') item.status = 'paused';
+    if (typeof item.error === 'string') item.error = { code: 'unknown', params: { detail: item.error } };
+    item.speed = 0;
+    item.retry = null;
+    item.request ||= {};
+    await removeLegacySegments(item.savePath);
+    if (item.status === 'paused' || item.status === 'error') {
+      const partSize = await getFileSize(`${item.savePath}.part`);
+      if (Array.isArray(item.chunks) && item.chunks.length && partSize === item.totalBytes) {
+        item.chunks = item.chunks.map(({ start, end, done }) => ({ start, end, done: Math.min(done, end - start + 1) }));
+        item.receivedBytes = item.chunks.reduce((sum, chunk) => sum + chunk.done, 0);
+      } else {
+        item.chunks = null;
+        item.receivedBytes = partSize;
+      }
+    }
+  }
+
   getState() {
+    const downloads = this.items.map(publicItem);
+    const speed = downloads.reduce((sum, item) => sum + (item.status === 'downloading' ? item.speed || 0 : 0), 0);
     return {
-      downloads: this.items.map((item) => ({ ...item })),
-      settings: { outputFolder: this.defaultFolder, ...this.settings },
-      maxActiveDownloads: this.settings.maxActiveDownloads
+      downloads,
+      settings: { ...this.settings, outputFolder: this.outputFolder },
+      maxActiveDownloads: this.settings.maxActiveDownloads,
+      stats: {
+        speed,
+        active: downloads.filter((item) => item.status === 'downloading').length,
+        queued: downloads.filter((item) => item.status === 'queued').length,
+        completed: downloads.filter((item) => item.status === 'completed').length,
+        failed: downloads.filter((item) => item.status === 'error').length
+      }
+    };
+  }
+
+  // Export format: everything needed to recreate the list, never cookies.
+  exportState() {
+    return {
+      app: 'wasel',
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      downloads: this.items.map((item) => ({
+        url: item.url,
+        fileName: item.fileName,
+        status: item.status,
+        totalBytes: item.totalBytes,
+        createdAt: item.createdAt,
+        referer: item.request?.referer || ''
+      }))
     };
   }
 
@@ -88,83 +136,225 @@ class DownloadManager {
     return this.items.find((item) => item.id === id);
   }
 
-  async add({ url, fileName, startImmediately = true } = {}) {
-    if (typeof url !== 'string' || !url.trim()) throw new Error('أدخل رابطًا صالحًا.');
-    let parsed;
-    try {
-      parsed = new URL(url.trim());
-    } catch {
-      throw new Error('صيغة الرابط غير صحيحة.');
-    }
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      throw new Error('يدعم واصل روابط HTTP وHTTPS فقط.');
-    }
+  async add(input = {}) {
+    const {
+      url, fileName, folder, startImmediately = true, referer, cookies, cookieHeader, userAgent,
+      connections, checksum, source = 'manual', totalBytes, mime
+    } = input;
+    const parsed = parseHttpUrl(url);
+    const nameLocked = typeof fileName === 'string' && Boolean(fileName.trim());
+    const hls = isHlsUrl(parsed.href) || isHlsMime(mime);
+    let suggestedName = cleanFileName(nameLocked ? fileName : fileNameFromUrl(parsed.href) || 'download');
+    if (hls) suggestedName = suggestedName.replace(/\.m3u8$/i, '') + (/\.ts$/i.test(suggestedName) ? '' : '.ts');
+    const category = categoryFor(suggestedName);
+    const targetFolder = folder ? path.resolve(folder) : this.folderFor(category);
+    await ensureDirectory(targetFolder);
+    const unique = await this.reserveName(targetFolder, suggestedName);
 
-    await ensureDirectory(this.defaultFolder);
-    let urlFileName = path.posix.basename(parsed.pathname);
-    try {
-      urlFileName = decodeURIComponent(urlFileName);
-    } catch {
-      // Keep the encoded filename when the URL contains malformed escapes.
-    }
-    const suggestedName = cleanFileName(
-      typeof fileName === 'string' && fileName.trim()
-        ? fileName
-        : urlFileName || 'download'
-    );
-    const reservedNames = new Set(this.items.map((item) => item.fileName.toLowerCase()));
-    let fileNameUnique = uniqueName(suggestedName, reservedNames);
-    let suffix = 1;
-    while (
-      reservedNames.has(fileNameUnique.toLowerCase()) ||
-      await fileExists(path.join(this.defaultFolder, fileNameUnique)) ||
-      await fileExists(path.join(this.defaultFolder, `${fileNameUnique}.part`))
-    ) {
-      const extension = path.extname(suggestedName);
-      const base = suggestedName.slice(0, suggestedName.length - extension.length);
-      fileNameUnique = `${base} (${suffix})${extension}`;
-      suffix += 1;
-    }
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const item = {
-      id,
+      id: createId(),
       url: parsed.href,
-      fileName: fileNameUnique,
-      savePath: path.join(this.defaultFolder, fileNameUnique),
+      finalUrl: null,
+      kind: hls ? 'hls' : 'file',
+      fileName: unique,
+      savePath: path.join(targetFolder, unique),
+      folderLocked: Boolean(folder),
+      nameLocked,
+      nameResolved: false,
       status: startImmediately ? 'queued' : 'paused',
-      category: categoryFor(fileNameUnique),
+      category,
       receivedBytes: 0,
-      totalBytes: 0,
+      totalBytes: Number.isSafeInteger(totalBytes) && totalBytes > 0 ? totalBytes : 0,
       speed: 0,
+      resumable: null,
+      mime: typeof mime === 'string' ? mime.slice(0, 120) : '',
+      connections: Number.isInteger(connections) && connections >= 1 && connections <= 32 ? connections : null,
+      checksum: normalizeChecksum(checksum),
+      source: ['manual', 'browser', 'clipboard', 'import', 'protocol', 'batch'].includes(source) ? source : 'manual',
+      request: {
+        referer: typeof referer === 'string' ? referer.slice(0, 4096) : '',
+        userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 512) : '',
+        cookieHeader: typeof cookieHeader === 'string' ? cookieHeader.slice(0, 16384) : '',
+        cookies: Array.isArray(cookies) ? cookies.slice(0, 300) : []
+      },
+      chunks: null,
+      validators: null,
       createdAt: new Date().toISOString(),
-      error: null
+      completedAt: null,
+      error: null,
+      retry: null
     };
     this.items.unshift(item);
     await this.persist();
     this.publish();
     this.schedule();
-    return { ...item };
+    return publicItem(item);
+  }
+
+  // Turbo lifts the speed limit and uses the maximum number of connections per file.
+  applyRate() {
+    this.throttle.setRate(this.settings.turbo ? 0 : this.settings.speedLimit);
+  }
+
+  connectionsFor(item) {
+    return item.connections || (this.settings.turbo ? TURBO_CONNECTIONS : this.settings.connectionsPerDownload);
+  }
+
+  folderFor(category) {
+    return this.settings.categoryFolders
+      ? path.join(this.outputFolder, CATEGORY_FOLDERS[category] || CATEGORY_FOLDERS.other)
+      : this.outputFolder;
+  }
+
+  async reserveName(folder, name, ignoreId = null) {
+    const reserved = new Set(this.items
+      .filter((item) => item.id !== ignoreId && path.dirname(item.savePath).toLowerCase() === folder.toLowerCase())
+      .map((item) => item.fileName.toLowerCase()));
+    let candidate = uniqueName(name, reserved);
+    const extension = path.extname(name);
+    const base = name.slice(0, name.length - extension.length);
+    let suffix = 1;
+    while (reserved.has(candidate.toLowerCase())
+      || await fileExists(path.join(folder, candidate))
+      || await fileExists(path.join(folder, `${candidate}.part`))) {
+      candidate = `${base} (${suffix})${extension}`;
+      suffix += 1;
+    }
+    return candidate;
+  }
+
+  async probe({ url, referer, cookies, cookieHeader } = {}) {
+    const parsed = parseHttpUrl(url);
+    const jar = new CookieJar(Array.isArray(cookies) ? cookies : []);
+    if (cookieHeader) jar.addHeader(cookieHeader, parsed.href);
+    const control = { requests: new Set() };
+    const timer = setTimeout(() => {
+      control.stopReason = 'timeout';
+      destroyRequests(control);
+    }, 15_000);
+    try {
+      const { response, finalUrl } = await this.client.open(parsed.href, {
+        headers: { Range: 'bytes=0-0' }, jar, referer, control
+      });
+      response.resume();
+      destroyRequests(control);
+      const status = response.statusCode;
+      if (status >= 400) throw new WaselError('http', { status });
+      const mime = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      const base = { url: parsed.href, finalUrl, duplicate: this.items.some((item) => item.url === parsed.href) };
+      if (isHlsUrl(finalUrl) || isHlsMime(mime)) {
+        const name = fileNameFromUrl(finalUrl).replace(/\.m3u8$/i, '') || 'stream';
+        return { ...base, stream: true, fileName: `${cleanFileName(name)}.ts`, totalBytes: 0, resumable: true, mime, category: 'video' };
+      }
+      if (mime === 'text/html' && !isAttachment(response.headers['content-disposition'])) {
+        // A web page rather than a file: look inside it for videos, audio and file links.
+        const page = await this.readText(parsed.href, { jar, referer, control });
+        return {
+          ...base,
+          page: true,
+          title: pageTitle(page.text),
+          candidates: sniffPage(page.text, page.finalUrl),
+          fileName: resolveFileName({ finalUrl, originalUrl: parsed.href, mime }),
+          totalBytes: 0,
+          resumable: false,
+          mime,
+          category: 'other'
+        };
+      }
+      const rangeTotal = Number(response.headers['content-range']?.match(/\/(\d+)$/)?.[1]);
+      const length = Number(response.headers['content-length']);
+      const fileName = resolveFileName({
+        disposition: response.headers['content-disposition'],
+        finalUrl,
+        originalUrl: parsed.href,
+        mime: response.headers['content-type']
+      });
+      return {
+        url: parsed.href,
+        finalUrl,
+        fileName,
+        totalBytes: status === 206 && Number.isSafeInteger(rangeTotal)
+          ? rangeTotal
+          : (status === 200 && Number.isSafeInteger(length) ? length : 0),
+        resumable: status === 206,
+        mime: String(response.headers['content-type'] || '').split(';')[0],
+        category: categoryFor(fileName),
+        duplicate: this.items.some((item) => item.url === parsed.href)
+      };
+    } catch (error) {
+      if (control.stopReason === 'timeout') throw new WaselError('timeout', {});
+      if (error instanceof WaselError) throw error;
+      const described = describeError(error, { host: parsed.host });
+      throw new WaselError(described.code, described.params);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Reads a small text body (web page or playlist), capped so huge pages cannot stall us.
+  async readText(url, { jar, referer, control, headers = {}, limit = MAX_PAGE_BYTES }) {
+    const { response, finalUrl } = await this.client.open(url, { headers, jar, referer, control });
+    if (response.statusCode >= 400) {
+      response.resume();
+      throw new WaselError('http', { status: response.statusCode });
+    }
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response) {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size >= limit) break;
+    }
+    if (!response.destroyed) response.destroy();
+    return { text: Buffer.concat(chunks).toString('utf8'), finalUrl, mime: String(response.headers['content-type'] || '') };
+  }
+
+  async readBuffer(url, { jar, referer, control }) {
+    const { response } = await this.client.open(url, { jar, referer, control });
+    if (response.statusCode >= 400) {
+      response.resume();
+      throw new WaselError('http', { status: response.statusCode });
+    }
+    const chunks = [];
+    for await (const chunk of response) chunks.push(chunk);
+    return Buffer.concat(chunks);
   }
 
   async pause(id) {
     const item = this.requireItem(id);
-    if (item.status !== 'downloading' && item.status !== 'queued') return;
+    if (!ACTIVE_STATES.has(item.status)) return;
     item.status = 'paused';
-    const active = this.active.get(id);
-    if (active) {
-      active.stopReason = 'paused';
-      destroyRequests(active);
-      await active.done;
-    }
+    item.speed = 0;
+    item.retry = null;
+    await this.stopActive(id, 'paused');
     await this.persist();
     this.publish();
   }
 
   async resume(id) {
     const item = this.requireItem(id);
-    if (!['paused', 'error'].includes(item.status)) return;
+    if (!['paused', 'error', 'cancelled'].includes(item.status)) return;
     item.status = 'queued';
     item.error = null;
+    await this.persist();
+    this.publish();
+    this.schedule();
+  }
+
+  async restart(id) {
+    const item = this.requireItem(id);
+    await this.stopActive(id, 'cancelled');
+    await removePartial(item.savePath);
+    if (item.status === 'completed' && await fileExists(item.savePath)) {
+      const folder = path.dirname(item.savePath);
+      item.fileName = await this.reserveName(folder, item.fileName, item.id);
+      item.savePath = path.join(folder, item.fileName);
+    }
+    Object.assign(item, {
+      status: 'queued', receivedBytes: 0, speed: 0, chunks: null, validators: null, error: null,
+      retry: null, completedAt: null, nameResolved: item.nameLocked
+    });
+    if (item.checksum) item.checksum = { algorithm: item.checksum.algorithm, expected: item.checksum.expected };
     await this.persist();
     this.publish();
     this.schedule();
@@ -175,25 +365,25 @@ class DownloadManager {
     if (item.status === 'completed') return;
     item.status = 'cancelled';
     item.error = null;
-    const active = this.active.get(id);
-    if (active) active.stopReason = 'cancelled';
-    if (active) destroyRequests(active);
-    if (active?.done) await active.done;
-    await this.removePartial(item);
+    item.speed = 0;
+    await this.stopActive(id, 'cancelled');
+    await removePartial(item.savePath);
     item.receivedBytes = 0;
-    item.totalBytes = 0;
+    item.chunks = null;
     await this.persist();
     this.publish();
   }
 
   async remove(id, { deleteFile = false } = {}) {
     const item = this.requireItem(id);
-    if (item.status === 'downloading' || item.status === 'queued') {
-      throw new Error('أوقف التنزيل أو ألغِه قبل حذفه من القائمة.');
-    }
-    await this.removePartial(item);
+    await this.stopActive(id, 'removed');
+    await removePartial(item.savePath);
     if (deleteFile && item.status === 'completed') {
-      await fsp.unlink(item.savePath);
+      try {
+        await fsp.unlink(item.savePath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
     }
     this.items = this.items.filter((entry) => entry.id !== id);
     await this.persist();
@@ -207,15 +397,18 @@ class DownloadManager {
   }
 
   async pauseAll() {
-    await Promise.all(this.items
-      .filter((item) => item.status === 'downloading' || item.status === 'queued')
-      .map((item) => this.pause(item.id)));
+    await Promise.all(this.items.filter((item) => ACTIVE_STATES.has(item.status)).map((item) => this.pause(item.id)));
   }
 
   async resumeAll() {
-    await Promise.all(this.items
-      .filter((item) => ['paused', 'error'].includes(item.status))
-      .map((item) => this.resume(item.id)));
+    for (const item of this.items) {
+      if (!['paused', 'error'].includes(item.status)) continue;
+      item.status = 'queued';
+      item.error = null;
+    }
+    await this.persist();
+    this.publish();
+    this.schedule();
   }
 
   async stopAll() {
@@ -223,383 +416,574 @@ class DownloadManager {
   }
 
   async setOutputFolder(folder) {
-    if (typeof folder !== 'string' || !folder.trim()) throw new Error('اختر مجلد تنزيل صالحًا.');
+    if (typeof folder !== 'string' || !folder.trim()) throw new WaselError('invalid-folder', {});
     const resolvedFolder = path.resolve(folder);
-    const folderInfo = await fsp.stat(resolvedFolder);
-    if (!folderInfo.isDirectory()) throw new Error('المسار المحدد ليس مجلدًا.');
-    this.defaultFolder = resolvedFolder;
+    const info = await fsp.stat(resolvedFolder);
+    if (!info.isDirectory()) throw new WaselError('not-directory', { path: resolvedFolder });
+    this.outputFolder = resolvedFolder;
     await this.persist();
     this.publish();
     return this.getState().settings;
   }
 
-  async updateSettings(settings) {
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-      throw new Error('الإعدادات المحددة غير صالحة.');
-    }
-
-    const nextSettings = { ...this.settings };
-    if (settings.theme !== undefined) {
-      if (!['light', 'dark'].includes(settings.theme)) throw new Error('المظهر المحدد غير صالح.');
-      nextSettings.theme = settings.theme;
-    }
-    if (settings.language !== undefined) {
-      if (!isSupportedLanguage(settings.language)) throw new Error('لغة الواجهة المحددة غير مدعومة.');
-      nextSettings.language = settings.language;
-    }
-    if (settings.maxActiveDownloads !== undefined) {
-      const value = Number(settings.maxActiveDownloads);
-      if (!Number.isInteger(value) || value < 1 || value > 10) {
-        throw new Error('عدد التنزيلات المتزامنة يجب أن يكون بين 1 و10.');
-      }
-      nextSettings.maxActiveDownloads = value;
-    }
-    if (settings.connectionsPerDownload !== undefined) {
-      const value = Number(settings.connectionsPerDownload);
-      if (!Number.isInteger(value) || value < 1 || value > MAX_CONNECTIONS_PER_DOWNLOAD) {
-        throw new Error('عدد الاتصالات لكل تنزيل يجب أن يكون بين 1 و8.');
-      }
-      nextSettings.connectionsPerDownload = value;
-    }
-    if (settings.startWithWindows !== undefined) {
-      if (typeof settings.startWithWindows !== 'boolean') {
-        throw new Error('إعداد بدء التشغيل مع Windows غير صالح.');
-      }
-      nextSettings.startWithWindows = settings.startWithWindows;
-    }
-    this.settings = nextSettings;
+  async updateSettings(changes) {
+    this.settings = applySettings(this.settings, changes);
+    this.applyRate();
+    this.proxyCache.clear();
     await this.persist();
     this.publish();
     this.schedule();
     return this.getState().settings;
   }
 
+  async hash(id, algorithm = 'sha256') {
+    const item = this.requireItem(id);
+    if (item.status !== 'completed') throw new WaselError('not-completed', {});
+    if (!HASH_ALGORITHMS.includes(algorithm)) throw new WaselError('invalid-setting', { key: 'algorithm' });
+    return hashFile(item.savePath, algorithm);
+  }
+
   async shutdown() {
     this.shuttingDown = true;
     clearInterval(this.tick);
-    const activeDownloads = [...this.active.entries()];
-    for (const [id, active] of activeDownloads) {
+    const running = [...this.active.keys()];
+    for (const id of running) {
       const item = this.getDownload(id);
       if (item && item.status === 'downloading') item.status = 'paused';
-      active.stopReason = 'shutdown';
-      destroyRequests(active);
     }
-    await Promise.all(activeDownloads.map(([, active]) => active.done));
+    await Promise.all(running.map((id) => this.stopActive(id, 'shutdown')));
     await this.persist();
+    this.client.destroy();
+  }
+
+  async stopActive(id, reason) {
+    const control = this.active.get(id);
+    if (!control) return;
+    control.stopReason = reason;
+    destroyRequests(control);
+    clearTimeout(control.retryTimer);
+    control.wake?.();
+    await control.done;
   }
 
   requireItem(id) {
     const item = this.getDownload(id);
-    if (!item) throw new Error('تعذر العثور على التنزيل.');
+    if (!item) throw new WaselError('not-found', {});
     return item;
   }
 
+  async proxyFor(rawUrl) {
+    const { mode, url } = this.settings.proxy;
+    if (mode === 'none') return null;
+    if (mode === 'manual') return /^[a-z]+:\/\//i.test(url) ? url : `http://${url}`;
+    const origin = new URL(rawUrl).origin;
+    const cached = this.proxyCache.get(origin);
+    if (cached && Date.now() - cached.at < 60_000) return cached.value;
+    let value = null;
+    try {
+      const rule = String(await this.systemProxy(rawUrl) || 'DIRECT');
+      const entry = rule.split(';').map((part) => part.trim()).find((part) => /^(PROXY|HTTPS)\s+/i.test(part));
+      if (entry) {
+        const [kind, address] = entry.split(/\s+/);
+        value = `${kind.toUpperCase() === 'HTTPS' ? 'https' : 'http'}://${address}`;
+      }
+    } catch {
+      value = null;
+    }
+    this.proxyCache.set(origin, { value, at: Date.now() });
+    return value;
+  }
+
+  // New rows are unshifted, so the oldest queued row (the end of the list) starts first.
   schedule() {
     if (this.shuttingDown) return;
     while (this.active.size < this.settings.maxActiveDownloads) {
-      const item = this.items.find((entry) => entry.status === 'queued');
+      const item = this.items.findLast((entry) => entry.status === 'queued' && !this.active.has(entry.id));
       if (!item) break;
-      const startedAt = Date.now();
-      const control = {
-        requests: new Set(),
-        lastBytes: item.receivedBytes,
-        lastTime: startedAt,
-        samples: [[startedAt, item.receivedBytes]]
-      };
+      const now = Date.now();
+      const control = { requests: new Set(), samples: [[now, item.receivedBytes]], stopReason: null };
       this.active.set(item.id, control);
       item.status = 'downloading';
+      item.error = null;
       this.publish();
-      control.done = this.runDownload(item, control).finally(async () => {
-        this.active.delete(item.id);
-        try {
-          await this.persist();
-        } finally {
+      control.done = this.runDownload(item, control)
+        .catch((error) => {
+          item.status = 'error';
+          item.error = describeError(error, { path: item.savePath });
+        })
+        .finally(async () => {
+          this.active.delete(item.id);
+          item.speed = 0;
+          try {
+            await this.persist();
+          } catch (error) {
+            item.status = 'error';
+            item.error = describeError(error, { path: this.dataFile });
+          }
           this.publish();
           this.schedule();
-        }
-      }).catch((error) => {
-        item.status = 'error';
-        item.error = `تعذر حفظ حالة التنزيل: ${error.message}`;
-        this.publish();
-        this.schedule();
-      });
+          this.checkIdle();
+        });
+    }
+  }
+
+  checkIdle() {
+    if (this.shuttingDown || this.active.size) return;
+    if (this.items.some((item) => ACTIVE_STATES.has(item.status))) return;
+    if (this.hadActivity) {
+      this.hadActivity = false;
+      this.onEvent({ type: 'idle' });
     }
   }
 
   async runDownload(item, control) {
-    try {
-      await ensureDirectory(path.dirname(item.savePath));
-      const existingPartSize = await getFileSize(`${item.savePath}.part`);
-      let segmented = false;
-      if (existingPartSize === 0) {
-        try {
-          segmented = await this.trySegmentedDownload(item, control);
-        } catch (error) {
-          if (error.code !== 'ERR_RANGE_UNSUPPORTED') throw error;
-          control.abortRequests = false;
-          await this.removeSegmentParts(item);
-          item.receivedBytes = 0;
-          item.totalBytes = 0;
-        }
-      }
-      if (!segmented) {
-        await this.removeSegmentParts(item);
-        await this.downloadSingleStream(item, control);
-      }
-      if (control.stopReason || item.status === 'paused' || item.status === 'cancelled' || this.shuttingDown) return;
-      if (item.totalBytes > 0 && item.receivedBytes !== item.totalBytes) {
-        throw new Error(`لم يكتمل الملف (${item.receivedBytes}/${item.totalBytes} بايت).`);
-      }
-      await fsp.rename(`${item.savePath}.part`, item.savePath);
-      item.status = 'completed';
-      item.receivedBytes = await fsp.stat(item.savePath).then((file) => file.size);
-      item.totalBytes = item.receivedBytes;
-      item.error = null;
-    } catch (error) {
-      let reportedError = error;
+    const jar = new CookieJar(item.request?.cookies || []);
+    if (item.request?.cookieHeader) jar.addHeader(item.request.cookieHeader, item.url);
+    control.jar = jar;
+    this.hadActivity = true;
+    let attempt = 0;
+    let restarts = 0;
+    let lastFailureBytes = -1;
+    for (;;) {
       try {
-        item.receivedBytes = await this.getPartialSize(item);
-      } catch (partialError) {
-        if (['EACCES', 'EPERM'].includes(partialError.code)) reportedError = partialError;
+        await this.transfer(item, control);
+        if (control.stopReason) return;
+        await this.finalize(item);
+        return;
+      } catch (error) {
+        if (control.stopReason || this.shuttingDown) return;
+        if (error.code === 'ERR_RESTART' && restarts < 2) {
+          restarts += 1;
+          await this.resetProgress(item);
+          continue;
+        }
+        if (item.receivedBytes > lastFailureBytes) attempt = 0;
+        lastFailureBytes = item.receivedBytes;
+        if (!isTransient(error) || attempt >= this.settings.retryCount) {
+          item.status = 'error';
+          item.error = describeError(error, { path: item.savePath, host: safeHost(item.url) });
+          item.retry = null;
+          item.speed = 0;
+          this.onEvent({ type: 'failed', item: publicItem(item) });
+          return;
+        }
+        attempt += 1;
+        const delay = Math.min(30_000, 1000 * 2 ** (attempt - 1));
+        item.retry = { attempt, max: this.settings.retryCount, at: Date.now() + delay, code: describeError(error).code };
+        item.speed = 0;
+        this.publish();
+        await new Promise((resolve) => {
+          control.wake = resolve;
+          control.retryTimer = setTimeout(resolve, delay);
+        });
+        item.retry = null;
+        if (control.stopReason) return;
       }
-      if (control.stopReason || item.status === 'paused' || item.status === 'cancelled' || this.shuttingDown) return;
-      item.status = 'error';
-      item.error = ['EACCES', 'EPERM'].includes(reportedError.code)
-        ? `لا توجد صلاحية للكتابة إلى مسار الحفظ "${item.savePath}". اختر مجلدًا آخر أو تحقق من صلاحيات القرص. (${reportedError.code})`
-        : reportedError.message || 'حدث خطأ أثناء التنزيل.';
     }
   }
 
-  async trySegmentedDownload(item, control) {
-    const probe = await this.openResponse(item.url, { Range: 'bytes=0-0' }, control);
-    const match = probe.response.headers['content-range']?.match(/^bytes 0-0\/(\d+)$/);
-    const total = Number(match?.[1]);
-    const supportsRanges = probe.response.statusCode === 206
-      && Number.isSafeInteger(total)
-      && total > 1;
-    const validators = {
-      etag: probe.response.headers.etag,
-      lastModified: probe.response.headers['last-modified']
-    };
-    if (!supportsRanges || control.stopReason) {
-      probe.request.destroy();
-      return false;
-    }
-    probe.response.resume();
-    await finished(probe.response);
+  async resetProgress(item) {
+    await removePartial(item.savePath);
+    item.chunks = null;
+    item.validators = null;
+    item.receivedBytes = 0;
+  }
 
-    item.totalBytes = total;
-    const parts = Array.from({ length: Math.ceil(total / RANGE_SEGMENT_SIZE) }, (_, index) => {
-      const start = index * RANGE_SEGMENT_SIZE;
-      const end = Math.min(total - 1, start + RANGE_SEGMENT_SIZE - 1);
-      return {
-        start,
-        end,
-        file: `${item.savePath}.part.segment-${index}`,
-        expectedSize: end - start + 1
-      };
-    });
-    const completedParts = new Set();
-    for (let index = 0; index < parts.length; index += 1) {
-      const size = await getFileSize(parts[index].file);
-      if (size === parts[index].expectedSize) completedParts.add(index);
-      else if (size > 0) await fsp.unlink(parts[index].file);
+  // One attempt at moving bytes: resumes a chunk map when one exists, otherwise opens
+  // a single request that doubles as the range-support probe.
+  async transfer(item, control) {
+    await ensureDirectory(path.dirname(item.savePath));
+    if (item.kind === 'hls') {
+      await this.transferHls(item, control);
+      return;
     }
-    item.receivedBytes = [...completedParts].reduce((size, index) => size + parts[index].expectedSize, 0);
-    let nextPartIndex = 0;
-    const workerCount = Math.min(this.settings.connectionsPerDownload, parts.length);
-    const workers = Array.from({ length: workerCount }, async () => {
-      while (!control.stopReason && !control.abortRequests) {
-        const index = nextPartIndex;
-        nextPartIndex += 1;
-        if (index >= parts.length) return;
-        if (completedParts.has(index)) continue;
+    const partPath = `${item.savePath}.part`;
+    if (item.chunks?.length && item.totalBytes > 0 && await getFileSize(partPath) === item.totalBytes) {
+      await this.transferChunks(item, control, null);
+      return;
+    }
 
-        const part = parts[index];
-        const headers = {
-          Range: `bytes=${part.start}-${part.end}`,
-          ...rangeValidatorHeaders(validators)
-        };
-        const { response } = await this.openResponse(item.url, headers, control);
-        const range = response.headers['content-range']?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
-        if (response.statusCode !== 206
-          || Number(range?.[1]) !== part.start
-          || Number(range?.[2]) !== part.end
-          || Number(range?.[3]) !== total) {
-          response.destroy();
-          const error = new Error('لم يحترم الخادم نطاقات التنزيل المتوازية؛ سيُستأنف باتصال واحد.');
-          error.code = 'ERR_RANGE_UNSUPPORTED';
-          throw error;
-        }
-        const progress = new Transform({
-          transform: (chunk, _encoding, callback) => {
-            item.receivedBytes += chunk.length;
-            callback(null, chunk);
-          }
-        });
-        await pipeline(response, progress, fs.createWriteStream(part.file, { flags: 'w' }));
-        if (await getFileSize(part.file) !== part.expectedSize) {
-          throw new Error('لم يكتمل أحد أجزاء الملف بالحجم المتوقع.');
-        }
-        completedParts.add(index);
+    item.chunks = null;
+    const offset = await getFileSize(partPath);
+    const { response, finalUrl } = await this.request(item, control, { Range: `bytes=${offset}-` }, item.url);
+    item.finalUrl = finalUrl;
+    control.resolvedUrl = finalUrl;
+    const status = response.statusCode;
+
+    if (status === 416 && offset > 0) {
+      response.resume();
+      const total = Number(response.headers['content-range']?.match(/\/(\d+)$/)?.[1]);
+      if (total === offset) {
+        item.totalBytes = total;
+        item.receivedBytes = total;
+        return;
       }
-    });
-    try {
-      await Promise.all(workers);
-    } catch (error) {
-      control.abortRequests = true;
-      destroyRequests(control);
-      await Promise.allSettled(workers);
-      throw error;
+      throw Object.assign(new Error('Partial file no longer matches the server'), { code: 'ERR_RESTART' });
     }
-    if (control.stopReason) return true;
-    if (item.receivedBytes !== total || completedParts.size !== parts.length) {
-      throw new Error('لم تكتمل جميع أجزاء التنزيل.');
+    if (status !== 200 && status !== 206) {
+      response.resume();
+      throw new WaselError('http', { status });
     }
 
-    const output = fs.createWriteStream(`${item.savePath}.part`, { flags: 'w' });
-    for (const part of parts) {
-      await pipeline(fs.createReadStream(part.file), output, { end: false });
+    const mime = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (isHlsMime(mime) || isHlsUrl(finalUrl)) {
+      response.resume();
+      item.kind = 'hls';
+      await this.transferHls(item, control);
+      return;
     }
-    output.end();
-    await finished(output);
-    await this.removeSegmentParts(item);
+    if (offset === 0 && await this.resolvePageLink(item, response, mime, finalUrl, control)) {
+      throw Object.assign(new Error('Switched from a page to its media'), { code: 'ERR_RESTART' });
+    }
+    if (offset === 0) await this.adoptResponseName(item, response, finalUrl);
+    const range = response.headers['content-range']?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+    if (status === 206 && range && Number(range[1]) === offset) {
+      const total = Number(range[3]);
+      item.totalBytes = total;
+      item.resumable = true;
+      item.validators = {
+        etag: response.headers.etag && !response.headers.etag.startsWith('W/') ? response.headers.etag : null,
+        lastModified: response.headers['last-modified'] || null
+      };
+      await preallocate(`${item.savePath}.part`, total, offset > 0);
+      item.chunks = planChunks(total, offset, this.connectionsFor(item));
+      item.receivedBytes = offset;
+      await this.transferChunks(item, control, response);
+      return;
+    }
+    if (status === 206) {
+      response.resume();
+      throw new WaselError('bad-range', {});
+    }
+
+    // No range support: stream the whole body sequentially.
+    item.resumable = false;
+    const length = Number(response.headers['content-length']);
+    item.totalBytes = Number.isSafeInteger(length) ? length : 0;
+    item.receivedBytes = 0;
+    const handle = await fsp.open(`${item.savePath}.part`, 'w');
+    try {
+      for await (const buffer of response) {
+        if (control.stopReason) break;
+        await this.throttle.consume(buffer.length, () => control.stopReason);
+        await handle.write(buffer, 0, buffer.length, null);
+        item.receivedBytes += buffer.length;
+      }
+    } finally {
+      await handle.close();
+    }
+    if (control.stopReason) return;
+    if (item.totalBytes > 0 && item.receivedBytes !== item.totalBytes) {
+      throw Object.assign(new Error('Connection closed early'), { code: 'ERR_INCOMPLETE' });
+    }
+  }
+
+  // "Any link": when a link opens a web page instead of a file, download the main video,
+  // stream or audio found on that page. Returns true when the item now points elsewhere.
+  async resolvePageLink(item, response, mime, finalUrl, control) {
+    if (mime !== 'text/html' || item.pageResolved || isAttachment(response.headers['content-disposition'])) return false;
+    if (/\.html?$/i.test(item.fileName) || categoryFor(fileNameFromUrl(item.url)) !== 'other') return false;
+    item.pageResolved = true;
+    response.resume();
+    const page = await this.readText(finalUrl, { jar: control.jar, referer: item.request?.referer, control });
+    const media = sniffPage(page.text, page.finalUrl).find((candidate) => ['stream', 'video', 'audio'].includes(candidate.kind));
+    if (!media) return true;
+    item.pageUrl = item.url;
+    item.request = { ...item.request, referer: item.request?.referer || item.url };
+    item.url = media.url;
+    item.kind = media.kind === 'stream' ? 'hls' : 'file';
+    if (!item.nameLocked) {
+      const title = pageTitle(page.text).replace(/\s*[|\-–—]\s*[^|\-–—]*$/, '') || media.name;
+      const extension = media.kind === 'stream' ? '.ts' : path.extname(media.name) || '.mp4';
+      const folder = path.dirname(item.savePath);
+      item.fileName = await this.reserveName(folder, cleanFileName(`${title.replace(/\.[a-z0-9]{2,4}$/i, '')}${extension}`), item.id);
+      item.savePath = path.join(folder, item.fileName);
+      item.category = categoryFor(item.fileName);
+      item.nameResolved = true;
+    }
+    control.resolvedUrl = null;
+    this.publish();
     return true;
   }
 
-  async removeSegmentParts(item) {
-    const directory = path.dirname(item.savePath);
-    const prefix = `${path.basename(item.savePath)}.part.segment-`;
-    let files;
+  // Downloads an HLS stream: best variant, segments fetched in parallel but written in
+  // order, AES-128 decrypted, resumable from the last written segment.
+  async transferHls(item, control) {
+    const options = { jar: control.jar, referer: item.request?.referer, control };
+    if (!/\.ts$/i.test(item.fileName) && !item.nameLocked) {
+      const folder = path.dirname(item.savePath);
+      item.fileName = await this.reserveName(folder, `${item.fileName.replace(/\.[^.]+$/, '') || 'stream'}.ts`, item.id);
+      item.savePath = path.join(folder, item.fileName);
+      item.category = 'video';
+    }
+    let playlist = await this.readText(item.url, options);
+    if (!isPlaylist(playlist.text)) throw new WaselError('not-playlist', {});
+    const variant = bestVariant(playlist.text, playlist.finalUrl);
+    if (variant) playlist = await this.readText(variant.url, options);
+    const segments = mediaSegments(playlist.text, playlist.finalUrl);
+    if (!segments.length) throw new WaselError('not-playlist', {});
+
+    const partPath = `${item.savePath}.part`;
+    const state = item.hls?.count === segments.length ? item.hls : { next: 0, bytes: 0, count: segments.length };
+    if (await getFileSize(partPath) < state.bytes) Object.assign(state, { next: 0, bytes: 0 });
+    item.hls = state;
+    item.resumable = true;
+    item.chunks = null;
+    const handle = await fsp.open(partPath, state.bytes ? 'r+' : 'w');
+    await handle.truncate(state.bytes);
+    const keys = new Map();
+    const fetchSegment = async (segment) => {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          let data = await this.readBuffer(segment.url, options);
+          if (segment.key) {
+            if (!keys.has(segment.key.uri)) keys.set(segment.key.uri, this.readBuffer(segment.key.uri, options));
+            data = decryptSegment(data, await keys.get(segment.key.uri), segment);
+          }
+          return data;
+        } catch (error) {
+          if (control.stopReason || attempt >= 4 || !isTransient(error)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+        }
+      }
+    };
+    const pending = new Map();
     try {
-      files = await fsp.readdir(directory);
-    } catch (error) {
-      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return;
-      throw error;
+      let launched = state.next;
+      const concurrency = Math.min(HLS_CONCURRENCY, this.connectionsFor(item));
+      while (state.next < segments.length && !control.stopReason) {
+        while (launched < segments.length && pending.size < concurrency) {
+          const request = fetchSegment(segments[launched]);
+          request.catch(() => {});
+          pending.set(launched, request);
+          launched += 1;
+        }
+        const data = await pending.get(state.next);
+        pending.delete(state.next);
+        if (control.stopReason) break;
+        await this.throttle.consume(data.length, () => control.stopReason);
+        await handle.write(data, 0, data.length, state.bytes);
+        state.bytes += data.length;
+        state.next += 1;
+        item.receivedBytes = state.bytes;
+        item.totalBytes = Math.round((state.bytes / state.next) * segments.length);
+      }
+    } finally {
+      await handle.close();
     }
-    await Promise.all(files.filter((file) => file.startsWith(prefix))
-      .map((file) => fsp.unlink(path.join(directory, file))));
+    if (control.stopReason) return;
+    item.totalBytes = state.bytes;
   }
 
-  async downloadSingleStream(item, control) {
-    let offset = await getFileSize(`${item.savePath}.part`);
-    item.receivedBytes = offset;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const headers = offset > 0 ? { Range: `bytes=${offset}-` } : {};
-      const { response, request } = await this.openResponse(item.url, headers, control);
-      const status = response.statusCode || 0;
-
-      if (status === 416 && offset > 0) {
-        const range = response.headers['content-range'] || '';
-        const total = Number(range.match(/\/(\d+)$/)?.[1]);
-        response.resume();
-        if (Number.isFinite(total) && total === offset) {
-          item.totalBytes = total;
-          break;
-        }
-        await this.removePartial(item);
-        offset = 0;
-        continue;
-      }
-
-      const append = offset > 0 && status === 206;
-      if (offset > 0 && status === 200) {
-        response.resume();
-        request.destroy();
-        await this.removePartial(item);
-        offset = 0;
-        continue;
-      }
-      if (status < 200 || status >= 300) {
-        response.resume();
-        throw httpStatusError(status);
-      }
-      if (append) {
-        const start = Number(response.headers['content-range']?.match(/^bytes (\d+)-/)?.[1]);
-        if (start !== offset) {
-          response.resume();
-          throw new Error('أرسل الخادم نطاق استئناف غير متوقع.');
-        }
-      }
-
-      const contentLength = Number(response.headers['content-length']);
-      const contentRangeTotal = Number(response.headers['content-range']?.match(/\/(\d+)$/)?.[1]);
-      item.totalBytes = Number.isFinite(contentRangeTotal)
-        ? contentRangeTotal
-        : Number.isFinite(contentLength) ? offset + contentLength : 0;
-      item.receivedBytes = append ? offset : 0;
-      const output = fs.createWriteStream(`${item.savePath}.part`, { flags: append ? 'a' : 'w' });
-      const progress = new Transform({
-        transform: (chunk, _encoding, callback) => {
-          item.receivedBytes += chunk.length;
-          callback(null, chunk);
-        }
-      });
-      await pipeline(response, progress, output);
-      item.receivedBytes = await getFileSize(`${item.savePath}.part`);
-      if (item.totalBytes > 0 && item.receivedBytes !== item.totalBytes) {
-        throw new Error(`انقطع الاتصال قبل اكتمال الملف (${item.receivedBytes}/${item.totalBytes} بايت).`);
-      }
-      break;
-    }
-  }
-
-  openResponse(rawUrl, headers, control, redirects = 0) {
-    return new Promise((resolve, reject) => {
-      let parsed;
-      try {
-        parsed = new URL(rawUrl);
-      } catch (error) {
-        reject(error);
-        return;
-      }
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        reject(new Error('أعاد الخادم توجيه الرابط إلى بروتوكول غير مدعوم.'));
-        return;
-      }
-      if (redirects > 10) {
-        reject(new Error('تجاوز الرابط الحد المسموح به من التحويلات.'));
-        return;
-      }
-      const transport = parsed.protocol === 'https:' ? https : http;
-      const request = transport.get(parsed, { headers }, (response) => {
-        if (REDIRECT_CODES.has(response.statusCode) && response.headers.location) {
-          const nextUrl = new URL(response.headers.location, parsed).href;
-          response.resume();
-          this.openResponse(nextUrl, headers, control, redirects + 1).then(resolve, reject);
-          return;
-        }
-        resolve({ response, request });
-      });
-      control.requests.add(request);
-      request.once('close', () => control.requests.delete(request));
-      request.setTimeout(30_000, () => request.destroy(new Error('انتهت مهلة الاتصال بالخادم.')));
-      request.once('error', reject);
+  request(item, control, headers, url = control.resolvedUrl || item.url) {
+    return this.client.open(url, {
+      headers: item.request?.userAgent ? { ...headers, 'User-Agent': item.request.userAgent } : headers,
+      jar: control.jar,
+      referer: item.request?.referer,
+      control
     });
   }
 
-  async getPartialSize(item) {
+  // Applies the server-provided name (Content-Disposition, redirect target, MIME) before
+  // any byte is written, and refuses HTML error pages that stand in for a file.
+  async adoptResponseName(item, response, finalUrl) {
+    const mime = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    item.mime = mime || item.mime;
+    const expectedCategory = categoryFor(fileNameFromUrl(item.url));
+    if (mime === 'text/html' && !isAttachment(response.headers['content-disposition'])
+      && expectedCategory !== 'other' && !/\.html?$/i.test(item.fileName)) {
+      response.resume();
+      throw new WaselError('html-response', { host: safeHost(finalUrl) });
+    }
+    if (item.nameLocked || item.nameResolved) return;
+    item.nameResolved = true;
+    const name = resolveFileName({
+      disposition: response.headers['content-disposition'],
+      finalUrl,
+      originalUrl: item.url,
+      mime
+    });
+    const category = categoryFor(name);
+    const folder = item.folderLocked ? path.dirname(item.savePath) : this.folderFor(category);
+    if (name === item.fileName && folder === path.dirname(item.savePath)) return;
+    await ensureDirectory(folder);
+    await removePartial(item.savePath);
+    item.fileName = await this.reserveName(folder, name, item.id);
+    item.savePath = path.join(folder, item.fileName);
+    item.category = category;
+    this.publish();
+  }
+
+  async transferChunks(item, control, firstResponse) {
+    const handle = await fsp.open(`${item.savePath}.part`, 'r+');
+    const connections = this.connectionsFor(item);
+    item.receivedBytes = item.chunks.reduce((sum, chunk) => sum + chunk.done, 0);
+    control.failure = null;
+    let liveWorkers = 0;
+
+    const takeChunk = () => {
+      const pending = item.chunks.find((chunk) => !chunk.active && chunk.done < chunk.end - chunk.start + 1);
+      return pending || this.steal(item);
+    };
+
+    const worker = async (initial) => {
+      liveWorkers += 1;
+      let response = initial?.response || null;
+      let chunk = initial?.chunk || null;
+      try {
+        while (!control.stopReason && !control.failure) {
+          chunk ||= takeChunk();
+          if (!chunk) return;
+          chunk.active = true;
+          let failures = 0;
+          try {
+            for (;;) {
+              try {
+                await this.fetchChunk(item, control, handle, chunk, response);
+                response = null;
+                break;
+              } catch (error) {
+                if (response && !response.destroyed) response.destroy();
+                response = null;
+                if (control.stopReason || control.failure) return;
+                // Servers that cap connections per client answer extra ranges with
+                // 403/429/503. Retire this worker and let the others take its range.
+                if (error.code === 'http' && [403, 429, 503].includes(error.params.status) && liveWorkers > 1) return;
+                failures += 1;
+                if (!isTransient(error) || failures > CHUNK_RETRIES) throw error;
+                await new Promise((resolve) => setTimeout(resolve, 400 * failures));
+              }
+            }
+          } finally {
+            chunk.active = false;
+            chunk.inflight = 0;
+          }
+          chunk = null;
+        }
+      } catch (error) {
+        control.failure ||= error;
+        destroyRequests(control);
+      } finally {
+        liveWorkers -= 1;
+      }
+    };
+
     try {
-      const directory = path.dirname(item.savePath);
-      const prefix = `${path.basename(item.savePath)}.part.segment-`;
-      const files = await fsp.readdir(directory);
-      const segments = await Promise.all(files
-        .filter((file) => file.startsWith(prefix))
-        .map((file) => getFileSize(path.join(directory, file))));
-      return await getFileSize(`${item.savePath}.part`) + segments.reduce((size, value) => size + value, 0);
-    } catch (error) {
-      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return 0;
-      throw error;
+      const workers = [];
+      if (firstResponse) workers.push(worker({ response: firstResponse, chunk: item.chunks[0] }));
+      while (workers.length < connections) workers.push(worker(null));
+      await Promise.all(workers);
+      // A retired worker may leave a range behind once every peer has finished.
+      while (!control.stopReason && !control.failure && item.chunks.some(isIncomplete)) await worker(null);
+    } finally {
+      await handle.close();
+    }
+    if (control.stopReason) return;
+    if (control.failure) throw control.failure;
+    if (item.chunks.some(isIncomplete)) {
+      throw Object.assign(new Error('Some ranges are incomplete'), { code: 'ERR_INCOMPLETE' });
     }
   }
 
-  async removePartial(item) {
-    try {
-      await fsp.unlink(`${item.savePath}.part`);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
+  async fetchChunk(item, control, handle, chunk, response) {
+    if (!response) {
+      const start = chunk.start + chunk.done;
+      const opened = await this.request(item, control, {
+        Range: `bytes=${start}-${chunk.end}`,
+        ...rangeValidatorHeaders(item.validators)
+      });
+      response = opened.response;
+      const range = response.headers['content-range']?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+      if (response.statusCode === 200) {
+        response.resume();
+        throw Object.assign(new Error('Server ignored the range or the file changed'), { code: 'ERR_RESTART' });
+      }
+      if ([403, 404, 410].includes(response.statusCode) && control.resolvedUrl !== item.url) {
+        // Signed redirect targets expire; go back through the original link next time.
+        response.resume();
+        control.resolvedUrl = item.url;
+        throw Object.assign(new Error('Redirect target expired'), { code: 'ERR_INCOMPLETE' });
+      }
+      if (response.statusCode !== 206) {
+        response.resume();
+        throw new WaselError('http', { status: response.statusCode });
+      }
+      if (!range || Number(range[1]) !== start || Number(range[3]) !== item.totalBytes) {
+        response.resume();
+        throw Object.assign(new Error('Unexpected range'), { code: 'ERR_RESTART' });
+      }
     }
-    await this.removeSegmentParts(item);
+
+    for await (const buffer of response) {
+      if (control.stopReason || control.failure) break;
+      await this.throttle.consume(buffer.length, () => control.stopReason);
+      const position = chunk.start + chunk.done;
+      const remaining = chunk.end - position + 1;
+      if (remaining <= 0) break;
+      const data = buffer.length > remaining ? buffer.subarray(0, remaining) : buffer;
+      chunk.inflight = data.length;
+      await handle.write(data, 0, data.length, position);
+      chunk.inflight = 0;
+      chunk.done += data.length;
+      item.receivedBytes += data.length;
+      if (chunk.start + chunk.done > chunk.end) break;
+    }
+    if (!response.destroyed) response.destroy();
+    if (control.stopReason || control.failure) return;
+    if (isIncomplete(chunk)) throw Object.assign(new Error('Range ended early'), { code: 'ERR_INCOMPLETE' });
+  }
+
+  // Dynamic segmentation: an idle connection splits the largest active range in half,
+  // so all connections stay busy until the very last byte.
+  steal(item) {
+    let best = null;
+    let bestRemaining = 0;
+    for (const chunk of item.chunks) {
+      if (!chunk.active) continue;
+      const remaining = chunk.end - (chunk.start + chunk.done + (chunk.inflight || 0)) + 1 - STEAL_SAFETY;
+      if (remaining > bestRemaining) {
+        best = chunk;
+        bestRemaining = remaining;
+      }
+    }
+    if (!best || bestRemaining < MIN_SPLIT * 2) return null;
+    const split = best.start + best.done + (best.inflight || 0) + STEAL_SAFETY + Math.floor(bestRemaining / 2);
+    const created = { start: split, end: best.end, done: 0 };
+    best.end = split - 1;
+    item.chunks.splice(item.chunks.indexOf(best) + 1, 0, created);
+    return created;
+  }
+
+  async finalize(item) {
+    const partPath = `${item.savePath}.part`;
+    const size = await getFileSize(partPath);
+    if (item.totalBytes > 0 && size !== item.totalBytes) {
+      throw Object.assign(new Error('File size mismatch'), { code: 'ERR_INCOMPLETE' });
+    }
+    if (await fileExists(item.savePath)) {
+      const folder = path.dirname(item.savePath);
+      const fresh = await this.reserveName(folder, item.fileName, item.id);
+      await fsp.rename(partPath, path.join(folder, `${fresh}.part`));
+      item.fileName = fresh;
+      item.savePath = path.join(folder, fresh);
+    }
+    await fsp.rename(`${item.savePath}.part`, item.savePath);
+    item.receivedBytes = size;
+    item.totalBytes = size;
+    item.chunks = null;
+    item.hls = null;
+    item.speed = 0;
+    item.error = null;
+    item.retry = null;
+    if (item.checksum?.expected) {
+      item.status = 'verifying';
+      this.publish();
+      const actual = await hashFile(item.savePath, item.checksum.algorithm);
+      item.checksum = { ...item.checksum, actual, ok: actual.toLowerCase() === item.checksum.expected.toLowerCase() };
+    }
+    item.status = 'completed';
+    item.completedAt = new Date().toISOString();
+    this.onEvent({ type: 'completed', item: publicItem(item) });
   }
 
   reportProgress() {
@@ -609,19 +993,16 @@ class DownloadManager {
       const item = this.getDownload(id);
       if (!item || item.status !== 'downloading') continue;
       control.samples.push([now, item.receivedBytes]);
-      while (control.samples.length > 1 && now - control.samples[0][0] > 3000) {
-        control.samples.shift();
-      }
+      while (control.samples.length > 1 && now - control.samples[0][0] > 3000) control.samples.shift();
       const [sampleTime, sampleBytes] = control.samples[0];
-      const deltaTime = now - sampleTime;
-      item.speed = deltaTime >= 500
-        ? Math.max(0, Math.round(((item.receivedBytes - sampleBytes) * 1000) / deltaTime))
-        : 0;
-      control.lastBytes = item.receivedBytes;
-      control.lastTime = now;
+      const elapsed = now - sampleTime;
+      item.speed = elapsed >= 400 ? Math.max(0, Math.round(((item.receivedBytes - sampleBytes) * 1000) / elapsed)) : 0;
       changed = true;
     }
-    if (changed) this.publish();
+    if (changed) {
+      this.publish();
+      if (now - this.lastPersist > PERSIST_INTERVAL) this.persist().catch(() => {});
+    }
   }
 
   publish() {
@@ -629,14 +1010,95 @@ class DownloadManager {
   }
 
   persist() {
+    this.lastPersist = Date.now();
     const contents = JSON.stringify({
-      items: this.items,
-      settings: { outputFolder: this.defaultFolder, ...this.settings }
-    }, null, 2);
-    this.persistChain = this.persistChain.then(() =>
-      fsp.writeFile(this.dataFile, contents, 'utf8')
-    );
+      version: 2,
+      items: this.items.map(storedItem),
+      settings: { ...this.settings, outputFolder: this.outputFolder }
+    });
+    this.persistChain = this.persistChain.catch(() => {}).then(() => writeAtomic(this.dataFile, contents));
     return this.persistChain;
+  }
+}
+
+function isIncomplete(chunk) {
+  return chunk.done < chunk.end - chunk.start + 1;
+}
+
+// Splits the remaining bytes evenly across connections; the first range keeps any bytes
+// already on disk from an interrupted single-connection download.
+function planChunks(total, offset, connections) {
+  const remaining = total - offset;
+  const count = Math.max(1, Math.min(connections, Math.floor(remaining / MIN_INITIAL_CHUNK) || 1));
+  const size = Math.ceil(remaining / count);
+  const chunks = [];
+  for (let index = 0; index < count; index += 1) {
+    const start = index === 0 ? 0 : offset + index * size;
+    const end = Math.min(total - 1, offset + (index + 1) * size - 1);
+    if (end < start) break;
+    chunks.push({ start, end, done: index === 0 ? offset : 0 });
+  }
+  return chunks;
+}
+
+function publicItem(item) {
+  const { request, chunks, validators, ...rest } = item;
+  return {
+    ...rest,
+    referer: request?.referer || '',
+    hasCookies: Boolean(request?.cookies?.length || request?.cookieHeader),
+    segments: chunks ? chunks.map((chunk) => [chunk.start, chunk.end, chunk.done, chunk.active ? 1 : 0]) : null
+  };
+}
+
+function storedItem(item) {
+  return {
+    ...item,
+    speed: 0,
+    retry: null,
+    chunks: item.chunks ? item.chunks.map(({ start, end, done }) => ({ start, end, done })) : null
+  };
+}
+
+function parseHttpUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new WaselError('empty-url', {});
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    throw new WaselError('invalid-url', { url: value.slice(0, 200) });
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new WaselError('unsupported-protocol', { protocol: parsed.protocol });
+  return parsed;
+}
+
+function normalizeChecksum(checksum) {
+  if (!checksum || typeof checksum.expected !== 'string' || !checksum.expected.trim()) return null;
+  const expected = checksum.expected.trim().toLowerCase();
+  const algorithm = HASH_ALGORITHMS.includes(checksum.algorithm) ? checksum.algorithm : guessAlgorithm(expected);
+  if (!algorithm || !/^[0-9a-f]+$/.test(expected)) throw new WaselError('invalid-checksum', {});
+  return { algorithm, expected };
+}
+
+function guessAlgorithm(hex) {
+  return { 32: 'md5', 40: 'sha1', 64: 'sha256', 128: 'sha512' }[hex.length] || null;
+}
+
+function rangeValidatorHeaders(validators) {
+  if (validators?.etag) return { 'If-Range': validators.etag };
+  if (validators?.lastModified) return { 'If-Range': validators.lastModified };
+  return {};
+}
+
+function createId() {
+  return `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function safeHost(rawUrl) {
+  try {
+    return new URL(rawUrl).host;
+  } catch {
+    return '';
   }
 }
 
@@ -644,16 +1106,35 @@ async function ensureDirectory(folder) {
   const resolvedFolder = path.resolve(folder);
   try {
     const info = await fsp.stat(resolvedFolder);
-    if (!info.isDirectory()) throw new Error(`مسار التنزيل ليس مجلدًا: ${folder}`);
+    if (!info.isDirectory()) throw new WaselError('not-directory', { path: resolvedFolder });
   } catch (error) {
-    if (error.code === 'ENOTDIR') {
-      throw new Error(`جزء من مسار التنزيل ليس مجلدًا: ${resolvedFolder}`);
-    }
+    if (error instanceof WaselError) throw error;
+    if (error.code === 'ENOTDIR') throw new WaselError('not-directory', { path: resolvedFolder });
     if (error.code !== 'ENOENT') throw error;
     if (path.normalize(resolvedFolder) === path.normalize(path.parse(resolvedFolder).root)) {
-      throw new Error(`قرص الحفظ غير متاح: ${resolvedFolder}. اختر مجلدًا على قرص متصل وقابل للكتابة.`);
+      throw new WaselError('drive-unavailable', { path: resolvedFolder });
     }
     await fsp.mkdir(resolvedFolder, { recursive: true });
+  }
+}
+
+async function preallocate(file, size, keepExisting) {
+  const handle = await fsp.open(file, keepExisting ? 'r+' : 'w');
+  try {
+    await handle.truncate(size);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeAtomic(file, contents) {
+  const temporary = `${file}.tmp`;
+  await fsp.writeFile(temporary, contents, 'utf8');
+  try {
+    await fsp.rename(temporary, file);
+  } catch {
+    await fsp.writeFile(file, contents, 'utf8');
+    await fsp.rm(temporary, { force: true });
   }
 }
 
@@ -665,63 +1146,28 @@ async function getFileSize(file) {
   try {
     return (await fsp.stat(file)).size;
   } catch (error) {
-    if (error.code === 'ENOENT') return 0;
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return 0;
     throw error;
   }
 }
 
-function rangeValidatorHeaders(validators) {
-  if (validators.etag && !validators.etag.startsWith('W/')) {
-    return { 'If-Range': validators.etag };
+async function removePartial(savePath) {
+  await fsp.rm(`${savePath}.part`, { force: true });
+  await removeLegacySegments(savePath);
+}
+
+// Version 1 stored parallel ranges as "<name>.part.segment-N" files.
+async function removeLegacySegments(savePath) {
+  const directory = path.dirname(savePath);
+  const prefix = `${path.basename(savePath)}.part.segment-`;
+  let files;
+  try {
+    files = await fsp.readdir(directory);
+  } catch {
+    return;
   }
-  if (validators.lastModified) return { 'If-Range': validators.lastModified };
-  return {};
-}
-
-function httpStatusError(status) {
-  const explanations = {
-    400: 'رفض الخادم الطلب؛ تحقق من الرابط أو من انتهاء صلاحيته.',
-    401: 'يتطلب الرابط تسجيل الدخول أو بيانات اعتماد صالحة؛ لا يستطيع واصل تجاوز المصادقة.',
-    403: 'رفض الخادم الوصول؛ تحقق من صلاحية الرابط أو نزّل الملف من الموقع بعد تسجيل الدخول.',
-    404: 'لم يعثر الخادم على الملف؛ تحقق من الرابط.',
-    408: 'انتهت مهلة الطلب لدى الخادم؛ حاول مرة أخرى لاحقًا.',
-    429: 'قيّد الخادم الطلبات مؤقتًا؛ انتظر قليلًا ثم أعد المحاولة.'
-  };
-  const explanation = explanations[status]
-    || (status >= 500 ? 'حدث خطأ مؤقت في الخادم؛ حاول مرة أخرى لاحقًا.' : 'رفض الخادم طلب التنزيل.');
-  return new Error(`استجاب الخادم برمز HTTP ${status}: ${explanation}`);
-}
-
-function cleanFileName(value) {
-  const cleaned = path.basename(value)
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-    .replace(/[. ]+$/g, '')
-    .trim();
-  return cleaned && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(cleaned)
-    ? cleaned
-    : 'download';
-}
-
-function uniqueName(fileName, reserved) {
-  const extension = path.extname(fileName);
-  const base = fileName.slice(0, fileName.length - extension.length);
-  let result = fileName;
-  let index = 1;
-  while (reserved.has(result.toLowerCase())) {
-    result = `${base} (${index})${extension}`;
-    index += 1;
-  }
-  return result;
-}
-
-function categoryFor(fileName) {
-  const extension = path.extname(fileName).toLowerCase();
-  if (['.mp4', '.mkv', '.mov', '.avi', '.mp3', '.wav', '.webm'].includes(extension)) return 'media';
-  if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt'].includes(extension)) return 'documents';
-  if (['.zip', '.rar', '.7z', '.gz', '.tar'].includes(extension)) return 'archives';
-  if (['.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp'].includes(extension)) return 'images';
-  if (['.exe', '.msi', '.dmg', '.deb', '.apk'].includes(extension)) return 'software';
-  return 'other';
+  await Promise.all(files.filter((file) => file.startsWith(prefix))
+    .map((file) => fsp.rm(path.join(directory, file), { force: true })));
 }
 
 async function fileExists(filePath) {
@@ -729,9 +1175,19 @@ async function fileExists(filePath) {
     await fsp.access(filePath);
     return true;
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
     throw error;
   }
 }
 
-module.exports = { DownloadManager, categoryFor, cleanFileName, uniqueName };
+function hashFile(file, algorithm) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash(algorithm);
+    fs.createReadStream(file)
+      .on('data', (data) => hash.update(data))
+      .on('error', reject)
+      .on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+module.exports = { DownloadManager, categoryFor, cleanFileName, uniqueName, planChunks };

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>واصل — مدير التنزيلات</title>
+    <meta name="description" content="واصل: مدير تنزيلات مجاني وسريع لنظام Windows، بتصميم أنيق، تنزيل متعدد الاتصالات، استئناف تلقائي، وإضافة للمتصفح.">
+    <meta name="theme-color" content="#000000">
+    <meta property="og:title" content="Wasel — Download Manager">
+    <meta property="og:description" content="Fast, beautiful and free download manager for Windows.">
+    <meta property="og:image" content="assets/screens/main-dark-eng.png">
+    <link rel="icon" type="image/svg+xml" href="assets/wasel.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;600;700&family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="tutorials.css">
+  </head>
+  <body>
+    <header class="global-nav">
+      <nav class="nav-inner" aria-label="Main">
+        <a class="nav-brand" href="#top"><img src="assets/wasel.svg" alt="" width="20" height="20"><span data-i18n="brand">واصل</span></a>
+        <div class="nav-links">
+          <a href="#features" data-i18n="nav.features">المزايا</a>
+          <a href="#browser" data-i18n="nav.browser">المتصفح</a>
+          <a href="#learn" data-i18n="nav.learn">شروحات</a>
+          <a href="#faq" data-i18n="nav.faq">الأسئلة</a>
+          <a href="https://github.com/mouadkennedy2001/wasel-download-manger" rel="noopener">GitHub</a>
+        </div>
+        <button type="button" class="lang-toggle" id="langToggle" aria-label="Switch language">English</button>
+      </nav>
+    </header>
+
+    <div class="sub-nav">
+      <div class="sub-nav-inner">
+        <strong data-i18n="brand">واصل</strong>
+        <a class="pill pill-small" href="#download" data-i18n="cta.download">تنزيل</a>
+      </div>
+    </div>
+
+    <main id="top">
+      <section class="tile tile-light hero">
+        <img class="hero-icon" src="assets/wasel.svg" alt="" width="96" height="96">
+        <h1 data-i18n="hero.title">التنزيل. بأناقة.</h1>
+        <p class="lead" data-i18n="hero.lead">مدير تنزيلات سريع ومجاني لنظام Windows. ينزّل أي رابط، حتى روابط الصفحات والبث، بـ 32 اتصالًا في وضع Turbo، ويستأنف تلقائيًا، ويعمل مع متصفحك.</p>
+        <div class="cta-row">
+          <a class="pill" href="#download" id="heroDownload" data-i18n="cta.downloadWindows">تنزيل لنظام Windows</a>
+          <a class="pill pill-ghost" href="#features" data-i18n="cta.learn">اعرف المزيد</a>
+        </div>
+        <p class="fine" id="heroVersion"></p>
+        <picture class="product">
+          <img id="heroShot" src="assets/screens/main-light-ara.png" alt="لقطة من تطبيق واصل" width="1280" height="800">
+        </picture>
+      </section>
+
+      <section class="tile tile-dark" id="features">
+        <p class="eyebrow" data-i18n="speed.eyebrow">السرعة</p>
+        <h2 data-i18n="speed.title">كل الاتصالات تعمل حتى آخر بايت.</h2>
+        <p class="lead-muted" data-i18n="speed.body">يقسّم واصل الملف ديناميكيًا: عندما ينهي اتصال جزءه، يأخذ نصف أكبر جزء متبقٍّ، فلا يبقى أي اتصال عاطلًا. والملف يُكتب مباشرة في مكانه دون خطوة دمج.</p>
+        <div class="stat-grid">
+          <div><strong>32</strong><span data-i18n="speed.stat1">اتصالًا لكل ملف في وضع Turbo</span></div>
+          <div><strong>10</strong><span data-i18n="speed.stat2">تنزيلات متزامنة</span></div>
+          <div><strong>0</strong><span data-i18n="speed.stat3">خطوة دمج للأجزاء</span></div>
+        </div>
+        <picture class="product product-dark"><img src="assets/screens/inspector-dark-eng.png" alt="" loading="lazy" width="1280" height="800"></picture>
+      </section>
+
+      <section class="tile tile-parchment">
+        <p class="eyebrow" data-i18n="reliable.eyebrow">الموثوقية</p>
+        <h2 data-i18n="reliable.title">ينقطع الاتصال. التنزيل يكمل.</h2>
+        <p class="lead-muted" data-i18n="reliable.body">إعادة محاولة تلقائية مع استئناف من حيث توقف، حتى بعد إغلاق الجهاز. يتعرف واصل على الروابط منتهية الصلاحية وعلى صفحات تسجيل الدخول بدل أن يحفظها كملفات تالفة.</p>
+        <div class="card-grid">
+          <article class="card"><h3 data-i18n="reliable.c1t">يعمل حيث تفشل البرامج الأخرى</h3><p data-i18n="reliable.c1">يعرّف نفسه كمتصفح حديث، ويحمل ملفات تعريف الارتباط عبر التحويلات، ويثق بشهادات Windows.</p></article>
+          <article class="card"><h3 data-i18n="reliable.c2t">أسماء ملفات صحيحة</h3><p data-i18n="reliable.c2">يقرأ الاسم الحقيقي من الخادم، بما في ذلك الأسماء العربية، بدل «download.php».</p></article>
+          <article class="card"><h3 data-i18n="reliable.c3t">تحقق من سلامة الملف</h3><p data-i18n="reliable.c3">ألصق بصمة SHA-256 أو MD5 ويتحقق واصل من الملف تلقائيًا بعد انتهائه.</p></article>
+        </div>
+      </section>
+
+      <section class="tile tile-light" id="browser">
+        <p class="eyebrow" data-i18n="browser.eyebrow">المتصفح</p>
+        <h2 data-i18n="browser.title">من المتصفح إلى واصل، مع جلستك.</h2>
+        <p class="lead-muted" data-i18n="browser.body">إضافة لـ Chrome وEdge وBrave وFirefox تلتقط التنزيلات وترسلها مع ملفات تعريف الارتباط وصفحة الإحالة، فتعمل حتى التنزيلات التي تتطلب تسجيل الدخول. كل شيء يبقى على جهازك.</p>
+        <picture class="product"><img id="addShot" src="assets/screens/add-light-ara.png" alt="" loading="lazy" width="1280" height="800"></picture>
+      </section>
+
+      <section class="tile tile-parchment" id="learn">
+        <p class="eyebrow" data-i18n="learn.eyebrow">شروحات</p>
+        <h2 data-i18n="learn.title">تعلّم واصل في دقيقة.</h2>
+        <p class="lead-muted" data-i18n="learn.body">شروحات متحركة خطوة بخطوة. اختر شرحًا، وسيعمل تلقائيًا، أو تنقّل بين المشاهد بنفسك.</p>
+        <div class="tutorial" id="tutorial">
+          <div class="tutorial-tabs" role="tablist" id="tutorialTabs"></div>
+          <div class="stage" id="stage" aria-live="polite"></div>
+          <div class="tutorial-caption">
+            <span class="scene-count" id="sceneCount" dir="ltr"></span>
+            <h3 id="sceneTitle"></h3>
+            <p id="sceneText"></p>
+          </div>
+          <div class="tutorial-controls">
+            <button type="button" class="round" id="scenePrev" aria-label="Previous">‹</button>
+            <div class="scene-dots" id="sceneDots"></div>
+            <button type="button" class="round" id="scenePlay" aria-label="Pause">❚❚</button>
+            <button type="button" class="round" id="sceneNext" aria-label="Next">›</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="tile tile-light" id="help">
+        <h2 data-i18n="help.title">حل المشكلات</h2>
+        <div class="faq">
+          <details><summary data-i18n="help.q1">يحذّرني Windows (SmartScreen) عند التثبيت</summary><p data-i18n="help.a1">التطبيق غير موقّع رقميًا بعد. اضغط «More info» ثم «Run anyway»، فقط إن نزّلت الملف من هذه الصفحة أو من صفحة الإصدارات الرسمية.</p></details>
+          <details><summary data-i18n="help.q2">موقع يرفض التنزيل (403 أو 401)</summary><p data-i18n="help.a2">الموقع يحتاج جلسة تسجيل دخولك. ثبّت الإضافة وابدأ التنزيل من المتصفح، فترسل الإضافة ملفات تعريف الارتباط إلى واصل.</p></details>
+          <details><summary data-i18n="help.q3">لصقت رابط صفحة وليس رابط ملف</summary><p data-i18n="help.a3">لا مشكلة. يفتح واصل الصفحة ويعرض الفيديوهات والملفات الموجودة فيها لتختار ما تريد، أو ينزّل الفيديو الرئيسي تلقائيًا.</p></details>
+          <details><summary data-i18n="help.q4">التنزيل بطيء</summary><p data-i18n="help.a4">فعّل Turbo من أسفل الشريط الجانبي: 32 اتصالًا لكل ملف دون حد للسرعة. بعض الخوادم تحدّ عدد الاتصالات، وواصل يتكيف معها تلقائيًا.</p></details>
+          <details><summary data-i18n="help.q5">أغلقت النافذة واختفى واصل</summary><p data-i18n="help.a5">واصل يعمل في علبة النظام قرب الساعة وتستمر التنزيلات. انقر أيقونته لإظهاره، أو اختر «إنهاء واصل» من قائمتها للخروج.</p></details>
+          <details><summary data-i18n="help.q6">لا يصلني التحديث التلقائي</summary><p data-i18n="help.a6">التحديث التلقائي يعمل ابتداءً من الإصدار 2. ثبّت هذا الإصدار مرة واحدة يدويًا، وبعدها تصلك التحديثات تلقائيًا.</p></details>
+        </div>
+      </section>
+
+      <section class="tile tile-dark">
+        <p class="eyebrow" data-i18n="more.eyebrow">وأكثر</p>
+        <h2 data-i18n="more.title">مصمم ليبقى بعيدًا عن طريقك.</h2>
+        <ul class="feature-list">
+          <li><strong data-i18n="more.f1t">جدولة</strong><span data-i18n="more.f1">ابدأ قائمة الانتظار ليلًا وأوقفها صباحًا، ثم أطفئ الجهاز عند الانتهاء.</span></li>
+          <li><strong data-i18n="more.f2t">تحديد السرعة</strong><span data-i18n="more.f2">حد واحد لكل التنزيلات ليبقى التصفح سلسًا.</span></li>
+          <li><strong data-i18n="more.f3t">مراقبة الحافظة</strong><span data-i18n="more.f3">انسخ رابطًا لملف، ويعرض واصل تنزيله بنقرة.</span></li>
+          <li><strong data-i18n="more.f4t">سلاسل مرقّمة</strong><span data-i18n="more.f4">أضف file[1-50].jpg دفعة واحدة.</span></li>
+          <li><strong data-i18n="more.f5t">الوكيل</strong><span data-i18n="more.f5">يستخدم وكيل النظام تلقائيًا، أو أدخل وكيلك يدويًا.</span></li>
+          <li><strong data-i18n="more.f6t">فاتح وداكن</strong><span data-i18n="more.f6">يتبع مظهر النظام، مع ثمانية ألوان تمييز.</span></li>
+        </ul>
+      </section>
+
+      <section class="tile tile-parchment" id="faq">
+        <h2 data-i18n="faq.title">أسئلة شائعة</h2>
+        <div class="faq">
+          <details><summary data-i18n="faq.q1">هل واصل مجاني؟</summary><p data-i18n="faq.a1">نعم، مجاني بالكامل ومفتوح المصدر، دون إعلانات أو تتبّع.</p></details>
+          <details><summary data-i18n="faq.q2">لماذا كانت بعض المواقع لا تُنزَّل في الإصدارات السابقة؟</summary><p data-i18n="faq.a2">كانت الإصدارات القديمة ترسل طلبات دون هوية متصفح ودون ملفات تعريف الارتباط، فترفضها مواقع كثيرة. الإصدار 2 يعالج ذلك، والإضافة ترسل جلسة تسجيل الدخول.</p></details>
+          <details><summary data-i18n="faq.q3">كيف أحدّث واصل؟</summary><p data-i18n="faq.a3">ابتداءً من الإصدار 2 يتحدث واصل تلقائيًا. إذا كان لديك الإصدار 1.2 أو أقدم، فنزّل هذا الإصدار وثبّته مرة واحدة فوق القديم؛ ستبقى قائمة تنزيلاتك.</p></details>
+          <details><summary data-i18n="faq.q4">هل يرسل واصل بياناتي إلى أي مكان؟</summary><p data-i18n="faq.a4">لا. الإضافة تتحدث فقط مع واصل على جهازك. التحقق من التحديثات هو الاتصال الوحيد بخوادم GitHub.</p></details>
+        </div>
+      </section>
+
+      <section class="tile tile-light download" id="download">
+        <img src="assets/wasel.svg" alt="" width="88" height="88">
+        <h2 data-i18n="download.title">جاهز عندما تكون جاهزًا.</h2>
+        <p class="lead-muted" data-i18n="download.body">Windows 10 و11، 64-بت. مجاني تمامًا.</p>
+        <a class="pill pill-large" id="downloadButton" href="https://github.com/mouadkennedy2001/wasel-download-manger/releases/latest" data-i18n="cta.downloadWindows">تنزيل لنظام Windows</a>
+        <p class="fine" id="downloadMeta"></p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <p data-i18n="footer.made">تطوير زروقي أحمد معاذ — Zerouki Ahmed Mouad.</p>
+        <p><span data-i18n="footer.assistant">مساعد مطوّر:</span> <a href="https://github.com/riadfgg" rel="noopener">riadfgg</a></p>
+        <p><a href="https://github.com/mouadkennedy2001/wasel-download-manger" rel="noopener">GitHub</a> · <a href="https://github.com/mouadkennedy2001/wasel-download-manger/issues" rel="noopener" data-i18n="footer.report">الإبلاغ عن مشكلة</a> · <a href="https://github.com/mouadkennedy2001/wasel-download-manger/releases" rel="noopener" data-i18n="footer.releases">الإصدارات</a></p>
+      </div>
+    </footer>
+    <script src="app.js"></script>
+    <script src="tutorials.js"></script>
+  </body>
+</html>

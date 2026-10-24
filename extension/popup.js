@@ -1,48 +1,86 @@
-import { createDownloadProtocolUrl } from './link-protocol.js';
-
 const api = globalThis.browser || globalThis.chrome;
-const input = document.getElementById('downloadUrl');
-const message = document.getElementById('message');
-const sendButton = document.getElementById('send');
-const captureDownloads = document.getElementById('captureDownloads');
-const captureStatus = document.getElementById('captureStatus');
+const $ = (id) => document.getElementById(id);
+const input = $('downloadUrl');
+const message = $('message');
+const sendButton = $('send');
+const captureToggle = $('captureDownloads');
+const bridgeDot = $('bridgeDot');
+const bridgeText = $('bridgeText');
 
-function showError(error) {
-  message.textContent = error.message || 'Could not prepare the download link.';
-  message.classList.add('error');
+function setMessage(text, type = '') {
+  message.textContent = text;
+  message.className = type;
 }
 
-api.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-  if (tab?.url && /^https?:\/\//i.test(tab.url)) input.value = tab.url;
-  else message.textContent = 'This page cannot be sent as a download link.';
-}).catch(showError);
+function linesOf(text) {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+async function refreshStatus() {
+  try {
+    const status = await api.runtime.sendMessage({ type: 'wasel:status' });
+    bridgeDot.classList.toggle('on', Boolean(status?.running));
+    bridgeText.textContent = status?.running ? 'Connected to Wasel' : 'Wasel is not running';
+  } catch {
+    bridgeDot.classList.remove('on');
+    bridgeText.textContent = 'Wasel is not reachable';
+  }
+}
+
+async function currentPage() {
+  const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+  if (tab?.url && /^https?:\/\//i.test(tab.url)) {
+    input.value = tab.url;
+    setMessage('The page address is filled in. Edit it or add more links, one per line.');
+  } else {
+    setMessage('This page cannot be sent. Paste a web link instead.');
+  }
+}
+
+async function cookiesForPage(url) {
+  if (!api.cookies?.getAll) return [];
+  try {
+    return await api.cookies.getAll({ url });
+  } catch {
+    return [];
+  }
+}
+
+sendButton.addEventListener('click', async () => {
+  const urls = linesOf(input.value).map((line) => (/^www\./i.test(line) ? `https://${line}` : line));
+  const valid = urls.filter((url) => /^https?:\/\/[^\s]+$/i.test(url));
+  if (!valid.length) {
+    setMessage('Enter at least one http or https link.', 'error');
+    return;
+  }
+  sendButton.disabled = true;
+  setMessage('Sending…');
+  try {
+    const cookies = valid.length === 1 ? await cookiesForPage(valid[0]) : [];
+    const payload = {
+      urls: valid,
+      referer: valid.length === 1 ? valid[0] : '',
+      userAgent: navigator.userAgent,
+      cookies: cookies.map(({ name, value, domain, path, secure, hostOnly }) => ({ name, value, domain, path, secure, hostOnly })),
+      source: 'popup'
+    };
+    const response = await api.runtime.sendMessage({ type: 'wasel:send', payload });
+    if (!response?.ok) throw new Error(response?.error || 'Wasel did not respond.');
+    setMessage(valid.length > 1 ? `Sent ${valid.length} links. Confirm them in Wasel.` : 'Sent. Confirm it in Wasel.', 'success');
+  } catch (error) {
+    setMessage(error.message || 'Could not send the link.', 'error');
+  } finally {
+    sendButton.disabled = false;
+  }
+});
+
+captureToggle.addEventListener('change', async () => {
+  await api.storage.local.set({ captureBrowserDownloads: captureToggle.checked });
+  setMessage(captureToggle.checked ? 'Browser downloads will go to Wasel.' : 'Browser downloads stay in the browser.');
+});
 
 api.storage.local.get({ captureBrowserDownloads: true }).then((settings) => {
-  captureDownloads.checked = settings.captureBrowserDownloads;
-}).catch(showError);
-
-captureDownloads.addEventListener('change', async () => {
-  const enabled = captureDownloads.checked;
-  captureDownloads.disabled = true;
-  try {
-    await api.storage.local.set({ captureBrowserDownloads: enabled });
-    captureStatus.textContent = enabled
-      ? 'Automatic browser download capture is enabled.'
-      : 'Browser downloads will stay in the browser.';
-  } catch (error) {
-    captureDownloads.checked = !enabled;
-    showError(error);
-  } finally {
-    captureDownloads.disabled = false;
-  }
+  captureToggle.checked = settings.captureBrowserDownloads;
 });
-
-sendButton.addEventListener('click', () => {
-  message.classList.remove('error');
-  try {
-    const protocolUrl = createDownloadProtocolUrl(input.value);
-    window.location.assign(protocolUrl);
-  } catch (error) {
-    showError(error);
-  }
-});
+refreshStatus();
+currentPage().catch(() => setMessage('Paste a link to send it.'));
