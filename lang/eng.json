@@ -375,6 +375,7 @@
     "add.kind.video": "Video",
     "add.kind.audio": "Audio",
     "add.kind.image": "Image",
-    "add.kind.file": "File"
+    "add.kind.file": "File",
+    "sidebar.resize": "Drag to resize the sidebar"
   }
 }

@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('wasel', {
   getLanguage: invoke('languages:get'),
   windowAction: invoke('window:action'),
   isWindowMaximized: invoke('window:is-maximized'),
+  setTitleBarOverlay: invoke('window:overlay'),
 
   getState: invoke('downloads:get-state'),
   add: invoke('downloads:add'),

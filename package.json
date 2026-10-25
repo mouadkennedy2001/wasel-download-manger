@@ -1,6 +1,6 @@
 {
   "name": "wasel-download-manager",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Wasel — a fast, Apple-style download manager for Windows with multi-connection downloads and browser integration",
   "author": "Zerouki Ahmed Mouad",
   "contributors": [
@@ -20,7 +20,7 @@
     "test": "npm run build:ts && node --test \"tests/*.test.js\"",
     "check": "npm run build:ts && node scripts/check-syntax.js",
     "build:win": "npm run build:ts && electron-builder --win nsis --x64",
-    "release:win": "npm run build:ts && electron-builder --win nsis --x64 --publish always"
+    "release:win": "node scripts/check-release.js && npm run build:ts && electron-builder --win nsis --x64 --publish always"
   },
   "devDependencies": {
     "electron": "^45.0.0",

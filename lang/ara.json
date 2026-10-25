@@ -409,6 +409,7 @@
     "add.kind.video": "فيديو",
     "add.kind.audio": "صوت",
     "add.kind.image": "صورة",
-    "add.kind.file": "ملف"
+    "add.kind.file": "ملف",
+    "sidebar.resize": "اسحب لتغيير عرض الشريط الجانبي"
   }
 }

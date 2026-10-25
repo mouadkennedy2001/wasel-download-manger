@@ -138,13 +138,14 @@ html[dir="rtl"] .mirror-rtl { transform: scaleX(-1); }
 /* ---------- Shell ---------- */
 .app {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) auto;
+  grid-template-columns: var(--sidebar-width, 240px) minmax(0, 1fr) auto;
   height: 100vh;
 }
 .app.sidebar-hidden { grid-template-columns: 0 minmax(0, 1fr) auto; }
 .app.sidebar-hidden .sidebar { visibility: hidden; }
 
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -155,20 +156,24 @@ html.material .sidebar { background: var(--sidebar); }
 html.material .main, html.material .inspector { background: var(--window); }
 
 .sidebar-top { height: 52px; flex: none; display: flex; align-items: center; padding-inline: 18px; }
-.traffic-lights { display: flex; gap: 8px; }
-.light {
-  width: 12px; height: 12px; padding: 0; border: 0; border-radius: 50%;
-  display: grid; place-items: center;
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.18);
+
+/* Drag the sidebar edge to resize it. */
+.sidebar-resizer {
+  position: absolute; top: 0; bottom: 0; inset-inline-end: -4px; width: 8px; z-index: 4;
+  cursor: col-resize; -webkit-app-region: no-drag;
 }
-.light svg { width: 8px; height: 8px; stroke: rgba(0, 0, 0, 0.55); stroke-width: 1.3; stroke-linecap: round; fill: none; opacity: 0; }
-.light-zoom svg { color: rgba(0, 0, 0, 0.55); }
-.light-close { background: #ff5f57; }
-.light-minimize { background: #febc2e; }
-.light-zoom { background: #28c840; }
-.traffic-lights:hover .light svg { opacity: 1; }
-.light:active { filter: brightness(0.85); }
-body.window-blurred .traffic-lights:not(:hover) .light { background: var(--fill-hover); box-shadow: inset 0 0 0 0.5px var(--separator-strong); }
+.sidebar-resizer::after {
+  content: ""; position: absolute; top: 0; bottom: 0; inset-inline-start: 3px; width: 2px;
+  background: transparent; transition: background 0.15s;
+}
+.sidebar-resizer:hover::after, .sidebar-resizer:focus-visible::after, body.resizing .sidebar-resizer::after { background: var(--accent); }
+.sidebar-resizer:focus-visible { box-shadow: none; }
+body.resizing, body.resizing * { cursor: col-resize !important; user-select: none; }
+
+/* Room for the native Windows caption buttons, always at the physical top-right. */
+html.wco[dir="ltr"] .app:not(.inspector-open) .toolbar { padding-right: 150px; }
+html.wco[dir="ltr"] .inspector-head { padding-right: 150px; }
+html.wco[dir="rtl"] .app.sidebar-hidden .toolbar { padding-left: 12px; padding-right: 150px; }
 
 .sidebar-scroll { flex: 1; overflow-y: auto; padding: 4px 10px 12px; }
 .sidebar-section + .sidebar-section { margin-top: 18px; }
@@ -707,7 +712,7 @@ html[dir="rtl"] .toast { padding: 8px 14px 8px 8px; }
   .search-kbd { display: none; }
 }
 @media (max-width: 900px) {
-  .app { grid-template-columns: 200px minmax(0, 1fr) auto; }
+  .app { grid-template-columns: min(var(--sidebar-width, 240px), 220px) minmax(0, 1fr) auto; }
   .inspector { width: 280px; }
 }
 

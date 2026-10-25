@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Wasel Download Manager",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Send links to Wasel and optionally take over browser downloads, keeping your sign-in session.",
   "permissions": ["downloads", "storage", "cookies", "contextMenus", "activeTab"],
   "host_permissions": ["<all_urls>"],

@@ -89,6 +89,15 @@ test('capture rules skip non-web, private and HTML downloads and honour the togg
   assert.equal(payload.totalBytes, 10);
 });
 
+test('IPC handlers never receive the event object in place of an omitted argument', () => {
+  // Regression: chooseFolder() with no argument received the IPC event as its default
+  // path, so "Change…" failed with "Default path must be a string".
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  assert.doesNotMatch(main, /listener\(\.\.\.args, event\)/);
+  assert.match(main, /ipcMain\.handle\(channel, \(_event, \.\.\.args\) => listener\(\.\.\.args\)\)/);
+  assert.match(main, /typeof defaultPath === 'string'/);
+});
+
 test('scheduler computes the next start on an enabled weekday', () => {
   const from = new Date(2026, 9, 24, 12, 0); // Saturday
   const next = nextRun({ enabled: true, start: '02:00', days: [1] }, from);

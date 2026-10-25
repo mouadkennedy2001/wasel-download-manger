@@ -135,6 +135,21 @@ function saveWindowState() {
   }, 400);
 }
 
+const TITLE_BAR_HEIGHT = 52;
+
+function titleBarColors() {
+  const dark = nativeTheme.shouldUseDarkColors;
+  return {
+    color: supportsMica ? '#00000000' : (dark ? '#1e1e20' : '#ffffff'),
+    symbolColor: dark ? '#f5f5f7' : '#1d1d1f',
+    height: TITLE_BAR_HEIGHT
+  };
+}
+
+nativeTheme.on('updated', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitleBarOverlay(titleBarColors());
+});
+
 async function createWindow() {
   const stored = await readWindowState();
   mainWindow = new BrowserWindow({
@@ -144,7 +159,10 @@ async function createWindow() {
     height: Math.max(stored.height || 760, 520),
     minWidth: 820,
     minHeight: 520,
-    frame: false,
+    // Hidden title bar with the native Windows caption buttons (minimize, maximize with
+    // Snap Layouts, close) drawn over the top-right corner of the page.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: titleBarColors(),
     show: false,
     backgroundColor: supportsMica ? '#00000000' : (nativeTheme.shouldUseDarkColors ? '#1e1e20' : '#f5f5f7'),
     ...(supportsMica ? { backgroundMaterial: 'mica' } : {}),
@@ -380,8 +398,15 @@ async function handleBridgeDownload(payload) {
   return { queued: true, confirm: false };
 }
 
+// Handlers receive only the renderer's arguments. Appending the IPC event made it fill
+// any optional parameter the renderer left out (e.g. chooseFolder() got the event as
+// its default path); handlers that need the sender use handleWithSender instead.
 function handle(channel, listener) {
-  ipcMain.handle(channel, (event, ...args) => listener(...args, event));
+  ipcMain.handle(channel, (_event, ...args) => listener(...args));
+}
+
+function handleWithSender(channel, listener) {
+  ipcMain.handle(channel, (event, ...args) => listener(BrowserWindow.fromWebContents(event.sender), ...args));
 }
 
 function registerIpc() {
@@ -413,8 +438,7 @@ function registerIpc() {
     if (!isSupportedLanguage(code)) throw new Error('WASEL:invalid-setting:{"key":"language"}');
     return JSON.parse(await fs.readFile(path.join(__dirname, '..', 'lang', `${code}.json`), 'utf8'));
   });
-  handle('window:action', (action, event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
+  handleWithSender('window:action', (window, action) => {
     if (!window) return null;
     if (action === 'minimize') window.minimize();
     else if (action === 'maximize') {
@@ -425,7 +449,14 @@ function registerIpc() {
     else if (action === 'quit') app.quit();
     return null;
   });
-  handle('window:is-maximized', (event) => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
+  handleWithSender('window:is-maximized', (window) => window?.isMaximized() ?? false);
+  // The renderer reports the colors under the caption buttons so they blend in.
+  handleWithSender('window:overlay', (window, colors) => {
+    const hex = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
+    if (!window || !hex.test(colors?.color) || !hex.test(colors?.symbolColor)) return false;
+    window.setTitleBarOverlay({ color: colors.color, symbolColor: colors.symbolColor, height: TITLE_BAR_HEIGHT });
+    return true;
+  });
 
   handle('updates:get-state', () => updates.state);
   handle('updates:check', () => updates.check());
@@ -461,7 +492,7 @@ function registerIpc() {
   handle('downloads:choose-folder', async (defaultPath) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory', 'createDirectory'],
-      defaultPath: defaultPath || manager.getState().settings.outputFolder
+      defaultPath: typeof defaultPath === 'string' && defaultPath ? defaultPath : manager.getState().settings.outputFolder
     });
     return result.canceled ? null : result.filePaths[0];
   });
@@ -483,7 +514,7 @@ function registerIpc() {
     }
   });
   handle('downloads:open-folder', async (folder) => {
-    const error = await shell.openPath(folder || manager.getState().settings.outputFolder);
+    const error = await shell.openPath(typeof folder === 'string' && folder ? folder : manager.getState().settings.outputFolder);
     if (error) throw new Error(`WASEL:open-failed:${JSON.stringify({ detail: error })}`);
   });
   handle('app:open-external', async (url) => {

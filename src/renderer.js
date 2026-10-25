@@ -505,6 +505,91 @@ function render() {
   renderToolbar();
   renderSelectionBar();
   renderInspector();
+  $('#app').classList.toggle('inspector-open', state.inspectorOpen);
+  syncTitleBar();
+}
+
+/* ---------- Windows caption buttons & sidebar width ---------- */
+
+function toHex(color) {
+  const match = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?/.exec(color);
+  if (!match) return null;
+  const alpha = match[4] === undefined ? 1 : Number(match[4]);
+  if (alpha < 0.99) return '#00000000';
+  return `#${[match[1], match[2], match[3]].map((value) => Math.round(Number(value)).toString(16).padStart(2, '0')).join('')}`;
+}
+
+let titleBarSignature = '';
+
+// The native buttons sit at the physical top-right; match them to whatever is beneath.
+function syncTitleBar() {
+  if (!document.documentElement.classList.contains('wco')) return;
+  let element = document.elementFromPoint(window.innerWidth - 70, 20);
+  let color = '#00000000';
+  while (element && element !== document.documentElement) {
+    const background = getComputedStyle(element).backgroundColor;
+    if (background && !/rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(background)) {
+      color = toHex(background) || color;
+      break;
+    }
+    element = element.parentElement;
+  }
+  const symbolColor = toHex(getComputedStyle(document.body).color) || '#1d1d1f';
+  const signature = `${color}|${symbolColor}`;
+  if (signature === titleBarSignature) return;
+  titleBarSignature = signature;
+  api.setTitleBarOverlay({ color, symbolColor }).catch(() => {});
+}
+
+const SIDEBAR_MIN = 190;
+const SIDEBAR_MAX = 380;
+
+function setSidebarWidth(width, persist = false) {
+  const clamped = Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, width)));
+  document.documentElement.style.setProperty('--sidebar-width', `${clamped}px`);
+  if (persist) writePreference('sidebarWidth', clamped);
+  return clamped;
+}
+
+function bindSidebarResizer() {
+  const handle = $('#sidebarResizer');
+  setSidebarWidth(readPreference('sidebarWidth', 240));
+  handle.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    document.body.classList.add('resizing');
+    const startX = event.clientX;
+    const startWidth = $('#sidebar').getBoundingClientRect().width;
+    // In right-to-left layouts the sidebar is on the right, so dragging left widens it.
+    const direction = document.documentElement.dir === 'rtl' ? -1 : 1;
+    const move = (moveEvent) => {
+      setSidebarWidth(startWidth + (moveEvent.clientX - startX) * direction);
+      drawSpeedGraph();
+    };
+    // Track on the whole window: the pointer leaves the thin handle as soon as it moves.
+    const stop = () => {
+      document.body.classList.remove('resizing');
+      setSidebarWidth($('#sidebar').getBoundingClientRect().width, true);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      window.removeEventListener('blur', stop);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    window.addEventListener('blur', stop);
+  });
+  handle.addEventListener('dblclick', () => {
+    setSidebarWidth(240, true);
+    drawSpeedGraph();
+  });
+  handle.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const outward = (event.key === 'ArrowRight') === (document.documentElement.dir !== 'rtl');
+    setSidebarWidth($('#sidebar').getBoundingClientRect().width + (outward ? 16 : -16), true);
+    drawSpeedGraph();
+  });
 }
 
 /* ---------- Graphs ---------- */
@@ -1520,12 +1605,7 @@ function bindEvents() {
   for (const button of $$('[data-window-action]')) {
     button.addEventListener('click', () => api.windowAction(button.dataset.windowAction));
   }
-  $('.toolbar').addEventListener('dblclick', (event) => {
-    if (!event.target.closest('button, input, label')) api.windowAction('maximize');
-  });
-  $('.sidebar-top').addEventListener('dblclick', (event) => {
-    if (!event.target.closest('button')) api.windowAction('maximize');
-  });
+  bindSidebarResizer();
 
   $('#scrim').addEventListener('click', () => {
     if (activeSheet?.id !== 'alertSheet') closeSheet();
@@ -1772,7 +1852,10 @@ function applyState(next) {
   state.downloads = next.downloads;
   state.stats = next.stats || state.stats;
   const settingsChanged = JSON.stringify(next.settings) !== JSON.stringify(state.settings);
+  // Language can change from any surface (settings, import, tray), so reload strings here.
+  const languageChanged = next.settings.language !== state.settings.language;
   state.settings = next.settings;
+  if (languageChanged) loadLocale(next.settings.language).catch(() => {});
   state.speedHistory.push(state.stats.speed || 0);
   if (state.speedHistory.length > HISTORY) state.speedHistory.shift();
   const live = new Set();
@@ -1802,6 +1885,8 @@ async function init() {
   state.info = info;
   state.update = update || state.update;
   document.documentElement.classList.toggle('material', Boolean(info.material));
+  document.documentElement.classList.toggle('wco', info.platform === 'win32');
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => requestAnimationFrame(syncTitleBar));
   $('#languageSelect').innerHTML = languages.map((language) => `<option value="${language.code}">${escapeHtml(language.name)}</option>`).join('');
   state.settings = initial.settings;
   state.downloads = initial.downloads;
