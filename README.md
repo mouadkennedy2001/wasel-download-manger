@@ -1,8 +1,8 @@
 # واصل — Wasel Download Manager
 
-مدير تنزيلات سريع وأنيق ومجاني لنظام Windows، بتصميم مستوحى من Apple وواجهة عربية أولًا.
+مدير تنزيلات سريع وأنيق ومجاني لنظامي Windows وLinux، بتصميم مستوحى من Apple وواجهة عربية أولًا.
 
-**الموقع:** https://mouadkennedy2001.github.io/wasel-download-manger/ · **التنزيل:** [أحدث إصدار](https://github.com/mouadkennedy2001/wasel-download-manger/releases/latest)
+**الموقع:** https://wasel-site.netlify.app · **التنزيل:** [أحدث إصدار](https://github.com/mouadkennedy2001/wasel-download-manger/releases/latest)
 
 ![Wasel](website/assets/screens/main-light-ara.png)
 
@@ -44,6 +44,9 @@ npm start
 - `npm test`: ‏37 اختبارًا لمحرك التنزيل (التقسيم، الاستئناف، الكوكيز، التحويلات، HLS، استخراج الروابط من الصفحات، الوكيل، تحديد السرعة)، والجسر مع الإضافة، والجدولة، والترجمة.
 - `npm run check`: فحص صياغة كل ملفات JavaScript.
 - `npm run build:win`: بناء مثبّت Windows محليًا في `dist/`.
+- `npm run build:linux`: بناء نسختي AppImage وDEB لنظام Linux في `dist/`.
+
+تعمل نسخة AppImage دون تثبيت، بينما يمكن تثبيت حزمة DEB على التوزيعات المبنية على Debian وUbuntu. التحديث التلقائي متاح لنسخة AppImage فقط؛ حزمة DEB تحتاج إلى تحديث يدوي.
 
 ## إضافة المتصفح
 
